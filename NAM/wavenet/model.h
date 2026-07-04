@@ -105,6 +105,16 @@ protected:
   /// \return Number of conditioning input channels
   virtual int _get_condition_dim() const { return NumInputChannels(); };
 
+  /// \brief Return an optional separate FiLM conditioning matrix (num_params × maxBufferSize).
+  ///
+  /// This is the ParametricWaveNet knob-injection hook. WaveNet::process() calls this once per block
+  /// and passes the result to every LayerArray::Process call as the film_condition pointer. Each Layer
+  /// then routes it to its active FiLM submodules instead of _condition_output (the audio condition).
+  ///
+  /// Base returns nullptr → FiLM conditioning falls back to _condition_output for all standard model types.
+  /// ParametricWaveNet overrides to return &_film_condition (knob values, num_params × N).
+  virtual const Eigen::MatrixXf* _get_film_condition() const { return nullptr; }
+
 private:
   std::vector<detail::LayerArray> _layer_arrays;
 

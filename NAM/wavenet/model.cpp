@@ -164,15 +164,19 @@ void nam::wavenet::detail::Layer::set_weights_(std::vector<float>::iterator& wei
 }
 
 void nam::wavenet::detail::Layer::Process(const Eigen::MatrixXf& input, const Eigen::MatrixXf& condition,
-                                          const int num_frames)
+                                          const int num_frames, const Eigen::MatrixXf* film_condition)
 {
   const long bottleneck = this->_bottleneck; // Use the actual bottleneck value, not the doubled output channels
+  // fc is the condition matrix routed into FiLM submodules. When film_condition is non-null (e.g.
+  // ParametricWaveNet passing knob values), FiLM uses it; otherwise falls back to audio condition.
+  // _input_mixin always receives condition (audio) regardless — it is not a FiLM module.
+  const Eigen::MatrixXf& fc = film_condition ? *film_condition : condition;
 
   // Step 1: input convolutions
   if (this->_conv_pre_film)
   {
     // Use Process() instead of Process_() since input is const
-    this->_conv_pre_film->Process(input, condition, num_frames);
+    this->_conv_pre_film->Process(input, fc, num_frames);
     this->_conv.Process(this->_conv_pre_film->GetOutput(), num_frames);
   }
   else
@@ -182,13 +186,13 @@ void nam::wavenet::detail::Layer::Process(const Eigen::MatrixXf& input, const Ei
   if (this->_conv_post_film)
   {
     Eigen::MatrixXf& conv_output = this->_conv.GetOutput();
-    this->_conv_post_film->Process_(conv_output, condition, num_frames);
+    this->_conv_post_film->Process_(conv_output, fc, num_frames);
   }
 
   if (this->_input_mixin_pre_film)
   {
     // Use Process() instead of Process_() since condition is const
-    this->_input_mixin_pre_film->Process(condition, condition, num_frames);
+    this->_input_mixin_pre_film->Process(condition, fc, num_frames); // input=audio, condition=fc (knobs or audio)
     this->_input_mixin.process_(this->_input_mixin_pre_film->GetOutput(), num_frames);
   }
   else
@@ -198,14 +202,14 @@ void nam::wavenet::detail::Layer::Process(const Eigen::MatrixXf& input, const Ei
   if (this->_input_mixin_post_film)
   {
     Eigen::MatrixXf& input_mixin_output = this->_input_mixin.GetOutput();
-    this->_input_mixin_post_film->Process_(input_mixin_output, condition, num_frames);
+    this->_input_mixin_post_film->Process_(input_mixin_output, fc, num_frames);
   }
   this->_z.leftCols(num_frames).noalias() =
     _conv.GetOutput().leftCols(num_frames) + _input_mixin.GetOutput().leftCols(num_frames);
 
   if (this->_activation_pre_film)
   {
-    this->_activation_pre_film->Process_(this->_z, condition, num_frames);
+    this->_activation_pre_film->Process_(this->_z, fc, num_frames); // fc = knobs (ParametricWaveNet) or audio
   }
 
   // Step 2 & 3: activation and 1x1
@@ -219,7 +223,7 @@ void nam::wavenet::detail::Layer::Process(const Eigen::MatrixXf& input, const Ei
     this->_activation->apply(this->_z.leftCols(num_frames));
     if (this->_activation_post_film)
     {
-      this->_activation_post_film->Process_(this->_z, condition, num_frames);
+      this->_activation_post_film->Process_(this->_z, fc, num_frames);
     }
     if (this->_layer1x1)
     {
@@ -236,7 +240,7 @@ void nam::wavenet::detail::Layer::Process(const Eigen::MatrixXf& input, const Ei
     if (this->_activation_post_film)
     {
       // Use Process() for blocks and copy result back
-      this->_activation_post_film->Process(this->_z.topRows(bottleneck), condition, num_frames);
+      this->_activation_post_film->Process(this->_z.topRows(bottleneck), fc, num_frames);
       this->_z.topRows(bottleneck).leftCols(num_frames).noalias() =
         this->_activation_post_film->GetOutput().leftCols(num_frames);
     }
@@ -255,7 +259,7 @@ void nam::wavenet::detail::Layer::Process(const Eigen::MatrixXf& input, const Ei
     if (this->_activation_post_film)
     {
       // Use Process() for blocks and copy result back
-      this->_activation_post_film->Process(this->_z.topRows(bottleneck), condition, num_frames);
+      this->_activation_post_film->Process(this->_z.topRows(bottleneck), fc, num_frames);
       this->_z.topRows(bottleneck).leftCols(num_frames).noalias() =
         this->_activation_post_film->GetOutput().leftCols(num_frames);
     }
@@ -265,7 +269,7 @@ void nam::wavenet::detail::Layer::Process(const Eigen::MatrixXf& input, const Ei
       if (this->_layer1x1_post_film)
       {
         Eigen::MatrixXf& layer1x1_output = this->_layer1x1->GetOutput();
-        this->_layer1x1_post_film->Process_(layer1x1_output, condition, num_frames);
+        this->_layer1x1_post_film->Process_(layer1x1_output, fc, num_frames);
       }
     }
   }
@@ -283,7 +287,7 @@ void nam::wavenet::detail::Layer::Process(const Eigen::MatrixXf& input, const Ei
     if (this->_head1x1_post_film)
     {
       Eigen::MatrixXf& head1x1_output = this->_head1x1->GetOutput();
-      this->_head1x1_post_film->Process_(head1x1_output, condition, num_frames);
+      this->_head1x1_post_film->Process_(head1x1_output, fc, num_frames);
     }
 #ifdef NAM_USE_INLINE_GEMM
     {
@@ -393,7 +397,8 @@ nam::wavenet::detail::LayerArray::LayerArray(const LayerArrayParams& params)
       params.layer1x1_params, params.head1x1_params, params.secondary_activation_configs[i],
       params.conv_pre_film_params, params.conv_post_film_params, params.input_mixin_pre_film_params,
       params.input_mixin_post_film_params, params.activation_pre_film_params, params.activation_post_film_params,
-      params._layer1x1_post_film_params, params.head1x1_post_film_params);
+      params._layer1x1_post_film_params, params.head1x1_post_film_params,
+      params.film_condition_size); // propagate FiLM condition dim (equals condition_size for standard models)
     this->_layers.push_back(Layer(layer_params));
   }
 }
@@ -425,15 +430,16 @@ long nam::wavenet::detail::LayerArray::get_receptive_field() const
 
 
 void nam::wavenet::detail::LayerArray::Process(const Eigen::MatrixXf& layer_inputs, const Eigen::MatrixXf& condition,
-                                               const int num_frames)
+                                               const int num_frames, const Eigen::MatrixXf* film_condition)
 {
   // Zero head inputs accumulator (first layer array)
   this->_head_inputs.setZero();
-  ProcessInner(layer_inputs, condition, num_frames);
+  ProcessInner(layer_inputs, condition, num_frames, film_condition);
 }
 
 void nam::wavenet::detail::LayerArray::Process(const Eigen::MatrixXf& layer_inputs, const Eigen::MatrixXf& condition,
-                                               const Eigen::MatrixXf& head_inputs, const int num_frames)
+                                               const Eigen::MatrixXf& head_inputs, const int num_frames,
+                                               const Eigen::MatrixXf* film_condition)
 {
   // Copy head inputs from previous layer array - use memcpy for pure copy
 #ifdef NAM_USE_INLINE_GEMM
@@ -444,11 +450,12 @@ void nam::wavenet::detail::LayerArray::Process(const Eigen::MatrixXf& layer_inpu
 #else
   this->_head_inputs.leftCols(num_frames).noalias() = head_inputs.leftCols(num_frames);
 #endif
-  ProcessInner(layer_inputs, condition, num_frames);
+  ProcessInner(layer_inputs, condition, num_frames, film_condition);
 }
 
 void nam::wavenet::detail::LayerArray::ProcessInner(const Eigen::MatrixXf& layer_inputs,
-                                                    const Eigen::MatrixXf& condition, const int num_frames)
+                                                    const Eigen::MatrixXf& condition, const int num_frames,
+                                                    const Eigen::MatrixXf* film_condition)
 {
   // Process rechannel and get output
   this->_rechannel.process_(layer_inputs, num_frames);
@@ -462,13 +469,13 @@ void nam::wavenet::detail::LayerArray::ProcessInner(const Eigen::MatrixXf& layer
     if (i == 0)
     {
       // First layer consumes the rechannel output buffer
-      this->_layers[i].Process(rechannel_output, condition, num_frames);
+      this->_layers[i].Process(rechannel_output, condition, num_frames, film_condition);
     }
     else
     {
       // Subsequent layers consume the full output buffer of the previous layer
       Eigen::MatrixXf& prev_output = this->_layers[i - 1].GetOutputNextLayer();
-      this->_layers[i].Process(prev_output, condition, num_frames);
+      this->_layers[i].Process(prev_output, condition, num_frames, film_condition);
     }
 
     // Accumulate head output from this layer
@@ -751,6 +758,11 @@ void nam::wavenet::WaveNet::process(NAM_SAMPLE** input, NAM_SAMPLE** output, con
 
   // Main layer arrays:
   // Layer-to-layer
+  //
+  // ParametricWaveNet extension: _get_film_condition() returns a num_params×N matrix of knob values that
+  // replaces _condition_output as the FiLM conditioning signal inside each layer. For all standard model
+  // types this returns nullptr, and FiLM falls back to _condition_output (the audio condition) unchanged.
+  const Eigen::MatrixXf* film_cond = this->_get_film_condition();
   for (size_t i = 0; i < this->_layer_arrays.size(); i++)
   {
     if (i == 0)
@@ -758,7 +770,7 @@ void nam::wavenet::WaveNet::process(NAM_SAMPLE** input, NAM_SAMPLE** output, con
       // First layer array - no head input
       // layer_inputs should be the original input (before condition_dsp processing),
       // condition should be the processed condition output (after condition_dsp)
-      this->_layer_arrays[i].Process(this->_condition_input, this->_condition_output, num_frames);
+      this->_layer_arrays[i].Process(this->_condition_input, this->_condition_output, num_frames, film_cond);
     }
     else
     {
@@ -767,7 +779,7 @@ void nam::wavenet::WaveNet::process(NAM_SAMPLE** input, NAM_SAMPLE** output, con
       // across API boundaries (which can cause Eigen to allocate temporaries).
       Eigen::MatrixXf& prev_layer_outputs = this->_layer_arrays[i - 1].GetLayerOutputs();
       Eigen::MatrixXf& prev_head_outputs = this->_layer_arrays[i - 1].GetHeadOutputs();
-      this->_layer_arrays[i].Process(prev_layer_outputs, this->_condition_output, prev_head_outputs, num_frames);
+      this->_layer_arrays[i].Process(prev_layer_outputs, this->_condition_output, prev_head_outputs, num_frames, film_cond);
     }
   }
 

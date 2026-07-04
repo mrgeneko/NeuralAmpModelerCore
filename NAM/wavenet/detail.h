@@ -104,19 +104,20 @@ public:
     if (params.conv_pre_film_params.active)
     {
       _conv_pre_film = std::make_unique<FiLM>(
-        params.condition_size, params.channels, params.conv_pre_film_params.shift, params.conv_pre_film_params.groups);
+        params.film_condition_size, params.channels, params.conv_pre_film_params.shift, params.conv_pre_film_params.groups);
     }
     if (params.conv_post_film_params.active)
     {
       const int conv_out_channels =
         (params.gating_mode != GatingMode::NONE) ? 2 * params.bottleneck : params.bottleneck;
-      _conv_post_film = std::make_unique<FiLM>(params.condition_size, conv_out_channels,
+      _conv_post_film = std::make_unique<FiLM>(params.film_condition_size, conv_out_channels,
                                                params.conv_post_film_params.shift, params.conv_post_film_params.groups);
     }
     if (params.input_mixin_pre_film_params.active)
     {
+      // First arg = condition_dim (film_condition_size, e.g. knobs); second = input_dim (condition_size, audio).
       _input_mixin_pre_film =
-        std::make_unique<FiLM>(params.condition_size, params.condition_size, params.input_mixin_pre_film_params.shift,
+        std::make_unique<FiLM>(params.film_condition_size, params.condition_size, params.input_mixin_pre_film_params.shift,
                                params.input_mixin_pre_film_params.groups);
     }
     if (params.input_mixin_post_film_params.active)
@@ -124,32 +125,34 @@ public:
       const int input_mixin_out_channels =
         (params.gating_mode != GatingMode::NONE) ? 2 * params.bottleneck : params.bottleneck;
       _input_mixin_post_film =
-        std::make_unique<FiLM>(params.condition_size, input_mixin_out_channels,
+        std::make_unique<FiLM>(params.film_condition_size, input_mixin_out_channels,
                                params.input_mixin_post_film_params.shift, params.input_mixin_post_film_params.groups);
     }
     if (params.activation_pre_film_params.active)
     {
       const int z_channels = (params.gating_mode != GatingMode::NONE) ? 2 * params.bottleneck : params.bottleneck;
+      // ParametricWaveNet: film_condition_size = num_params (knob count). This FiLM receives knob values
+      // (not audio) as its condition input at runtime, via the film_condition pointer in Layer::Process.
       _activation_pre_film =
-        std::make_unique<FiLM>(params.condition_size, z_channels, params.activation_pre_film_params.shift,
+        std::make_unique<FiLM>(params.film_condition_size, z_channels, params.activation_pre_film_params.shift,
                                params.activation_pre_film_params.groups);
     }
     if (params.activation_post_film_params.active)
     {
       _activation_post_film =
-        std::make_unique<FiLM>(params.condition_size, params.bottleneck, params.activation_post_film_params.shift,
+        std::make_unique<FiLM>(params.film_condition_size, params.bottleneck, params.activation_post_film_params.shift,
                                params.activation_post_film_params.groups);
     }
     if (params._layer1x1_post_film_params.active && params.layer1x1_params.active)
     {
       _layer1x1_post_film =
-        std::make_unique<FiLM>(params.condition_size, params.channels, params._layer1x1_post_film_params.shift,
+        std::make_unique<FiLM>(params.film_condition_size, params.channels, params._layer1x1_post_film_params.shift,
                                params._layer1x1_post_film_params.groups);
     }
     if (params.head1x1_post_film_params.active && params.head1x1_params.active)
     {
       _head1x1_post_film =
-        std::make_unique<FiLM>(params.condition_size, params.head1x1_params.out_channels,
+        std::make_unique<FiLM>(params.film_condition_size, params.head1x1_params.out_channels,
                                params.head1x1_post_film_params.shift, params.head1x1_post_film_params.groups);
     }
   };
@@ -178,7 +181,13 @@ public:
   ///
   /// Outputs are stored internally and accessible via GetOutputNextLayer() and GetOutputHead().
   /// Only the first num_frames columns of the output buffers are valid.
-  void Process(const Eigen::MatrixXf& input, const Eigen::MatrixXf& condition, const int num_frames);
+  ///
+  /// \param film_condition When non-null, all active FiLM submodules in this layer receive *film_condition
+  ///   as their conditioning input instead of condition. This is the ParametricWaveNet knob-injection path:
+  ///   condition (audio, 1×N) still goes to _input_mixin; *film_condition (knobs, num_params×N) goes to FiLM.
+  ///   For all standard model types this is nullptr → FiLM receives condition (same as before).
+  void Process(const Eigen::MatrixXf& input, const Eigen::MatrixXf& condition, const int num_frames,
+               const Eigen::MatrixXf* film_condition = nullptr);
 
   /// \brief Get the number of channels expected as input/output from this layer
   /// \return Number of channels
@@ -289,7 +298,9 @@ public:
   /// \param layer_inputs Input to the layer array (input_size x num_frames)
   /// \param condition Conditioning input (condition_size x num_frames)
   /// \param num_frames Number of frames to process
-  void Process(const Eigen::MatrixXf& layer_inputs, const Eigen::MatrixXf& condition, const int num_frames);
+  /// \param film_condition Optional separate FiLM condition (see Layer::Process). nullptr for all standard models.
+  void Process(const Eigen::MatrixXf& layer_inputs, const Eigen::MatrixXf& condition, const int num_frames,
+               const Eigen::MatrixXf* film_condition = nullptr);
 
   /// \brief Process with a given previous head input (subsequent layer arrays)
   ///
@@ -299,8 +310,10 @@ public:
   /// \param condition Conditioning input (condition_size x num_frames)
   /// \param head_inputs Head input from previous layer array (head_input_size x num_frames)
   /// \param num_frames Number of frames to process
+  /// \param film_condition Optional separate FiLM condition (see Layer::Process). nullptr for all standard models.
   void Process(const Eigen::MatrixXf& layer_inputs, const Eigen::MatrixXf& condition,
-               const Eigen::MatrixXf& head_inputs, const int num_frames);
+               const Eigen::MatrixXf& head_inputs, const int num_frames,
+               const Eigen::MatrixXf* film_condition = nullptr);
 
   /// \brief Get output from last layer (for next layer array)
   ///
@@ -354,8 +367,9 @@ private:
   const int _head_output_size;
 
   long _get_channels() const;
-  // Common processing logic after head inputs are set
-  void ProcessInner(const Eigen::MatrixXf& layer_inputs, const Eigen::MatrixXf& condition, const int num_frames);
+  // Common processing logic after head inputs are set. film_condition is threaded to every Layer::Process call.
+  void ProcessInner(const Eigen::MatrixXf& layer_inputs, const Eigen::MatrixXf& condition, const int num_frames,
+                    const Eigen::MatrixXf* film_condition = nullptr);
 };
 
 /// \brief Post-stack head: repeated (activation → Conv1D) with dilation 1, stride 1, valid (causal streaming) conv.

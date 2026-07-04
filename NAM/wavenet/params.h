@@ -124,8 +124,14 @@ struct LayerParams
               const _FiLMParams& conv_pre_film_params_, const _FiLMParams& conv_post_film_params_,
               const _FiLMParams& input_mixin_pre_film_params_, const _FiLMParams& input_mixin_post_film_params_,
               const _FiLMParams& activation_pre_film_params_, const _FiLMParams& activation_post_film_params_,
-              const _FiLMParams& _layer1x1_post_film_params_, const _FiLMParams& head1x1_post_film_params_)
+              const _FiLMParams& _layer1x1_post_film_params_, const _FiLMParams& head1x1_post_film_params_,
+              // ParametricWaveNet extension: FiLM modules are constructed with film_condition_size as their
+              // condition_dim rather than condition_size. Default 0 = use condition_size (backward compat).
+              // Non-zero only when the audio condition (condition_size) and the FiLM conditioning signal
+              // (e.g. knob values in ParametricWaveNet) have different dimensions.
+              const int film_condition_size_ = 0)
   : condition_size(condition_size_)
+  , film_condition_size(film_condition_size_ != 0 ? film_condition_size_ : condition_size_)
   , channels(channels_)
   , bottleneck(bottleneck_)
   , kernel_size(kernel_size_)
@@ -149,6 +155,10 @@ struct LayerParams
   }
 
   const int condition_size; ///< Size of the conditioning input
+  // When non-zero and != condition_size, all FiLM submodules in this layer are built with film_condition_size
+  // as their condition_dim instead of condition_size. _input_mixin always uses condition_size. This lets
+  // ParametricWaveNet route audio (condition_size=1) to input_mixin and knobs (film_condition_size=N) to FiLM.
+  const int film_condition_size; ///< Condition dim used when constructing FiLM submodules
   const int channels; ///< Number of input/output channels from layer to layer
   const int bottleneck; ///< Internal channel count
   const int kernel_size; ///< Kernel size for the dilated convolution
@@ -215,9 +225,13 @@ public:
                    const _FiLMParams& conv_pre_film_params_, const _FiLMParams& conv_post_film_params_,
                    const _FiLMParams& input_mixin_pre_film_params_, const _FiLMParams& input_mixin_post_film_params_,
                    const _FiLMParams& activation_pre_film_params_, const _FiLMParams& activation_post_film_params_,
-                   const _FiLMParams& _layer1x1_post_film_params_, const _FiLMParams& head1x1_post_film_params_)
+                   const _FiLMParams& _layer1x1_post_film_params_, const _FiLMParams& head1x1_post_film_params_,
+                   // See LayerParams::film_condition_size. This value propagates to each LayerParams built
+                   // from this object in LayerArray's constructor. Default 0 → use condition_size.
+                   const int film_condition_size_ = 0)
   : input_size(input_size_)
   , condition_size(condition_size_)
+  , film_condition_size(film_condition_size_ != 0 ? film_condition_size_ : condition_size_)
   , head_size(head_size_)
   , head_kernel_size(head_kernel_size_)
   , channels(channels_)
@@ -276,6 +290,9 @@ public:
 
   const int input_size; ///< Input size (number of channels)
   const int condition_size; ///< Size of conditioning input
+  // Propagated from the film_condition_size_ constructor arg. Equals condition_size for all standard models.
+  // Passed as film_condition_size to each LayerParams built inside LayerArray's constructor.
+  const int film_condition_size; ///< Condition dim for FiLM submodules across all layers in this array
   const int head_size; ///< Size of head output (after rechannel)
   const int head_kernel_size; ///< Kernel size of head rechannel convolution (>= 1)
   const int channels; ///< Number of channels in each layer

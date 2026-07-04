@@ -35,6 +35,7 @@
 #include "test/test_render_slim.cpp"
 #include "test/test_slimmable_wavenet.cpp"
 #include "test/test_a2_fast.cpp"
+#include "test/test_parametric_wavenet.cpp"
 
 int main()
 {
@@ -349,6 +350,33 @@ int main()
   test_a2_fast::test_process_realtime_safe_nano();
   test_a2_fast::test_process_realtime_safe_standard();
 #endif
+
+  // ParametricWaveNet: config parsing, construction, processing, SetKnobValues, registry, factory
+  test_parametric_wavenet::test_config_parse_valid_json();
+  test_parametric_wavenet::test_config_parse_missing_layers_throws();
+  test_parametric_wavenet::test_config_parse_invalid_channel_count_throws();
+  test_parametric_wavenet::test_config_parse_missing_head_scale_throws();
+  test_parametric_wavenet::test_config_parse_missing_parametric_block_throws();
+  test_parametric_wavenet::test_config_parse_missing_condition_size_throws();
+  test_parametric_wavenet::test_config_parse_condition_size_too_large_throws();
+  test_parametric_wavenet::test_config_parse_standard_channel_count();
+  test_parametric_wavenet::test_config_parse_param_defs_optional();
+  test_parametric_wavenet::test_construct_with_one_param();
+  test_parametric_wavenet::test_construct_with_multiple_params();
+  test_parametric_wavenet::test_get_parameter_defs();
+  test_parametric_wavenet::test_processes_finite_output();
+  test_parametric_wavenet::test_processes_zero_input_finite();
+  test_parametric_wavenet::test_different_buffer_sizes();
+  test_parametric_wavenet::test_set_knob_values_changes_output();
+  test_parametric_wavenet::test_set_knob_values_excess_values_no_crash();
+  test_parametric_wavenet::test_set_knob_values_empty_no_crash();
+  test_parametric_wavenet::test_default_knobs_midpoint();
+  test_parametric_wavenet::test_registry_has_parametric_wavenet();
+  test_parametric_wavenet::test_factory_creates_and_processes_nano();
+  test_parametric_wavenet::test_factory_nano_knobs_change_output();
+  test_parametric_wavenet::test_standard_wavenet_unaffected();
+  test_parametric_wavenet::test_dc_blocker_removes_dc_at_silence();
+  test_parametric_wavenet::test_dc_blocker_passes_ac_signal();
 
   std::cout << "Success!" << std::endl;
 #ifdef ADDASSERT
