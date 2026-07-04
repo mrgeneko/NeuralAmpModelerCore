@@ -122,6 +122,25 @@ int ContainerModel::GetPrewarmSamples()
   return _submodels[active_index].model->GetPrewarmSamples();
 }
 
+// [Fork] Knob API delegation -- parametric containers have uniform knob count across submodels.
+void ContainerModel::SetKnobValues(const std::vector<float>& values)
+{
+  // Write to every submodel, not just the active one, so knob state is preserved
+  // across SetSlimmableSize changes: the newly-active submodel is already primed.
+  for (auto& sm : _submodels)
+    sm.model->SetKnobValues(values);
+}
+
+int ContainerModel::GetNumParams() const
+{
+  return _submodels.empty() ? 0 : _submodels[0].model->GetNumParams();
+}
+
+std::vector<DSPParamDef> ContainerModel::GetParameterDefs() const
+{
+  return _submodels.empty() ? std::vector<DSPParamDef>{} : _submodels[0].model->GetParameterDefs();
+}
+
 // =============================================================================
 // Config / factory
 // =============================================================================

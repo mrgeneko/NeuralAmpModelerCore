@@ -41,6 +41,14 @@ public:
   void SetSlimmableSize(const double val) override;
   int GetPrewarmSamples() override;
 
+  // [Fork] Propagate knob API through the container to its submodels.
+  // All submodels in a parametric container share the same knob interface, so
+  // GetNumParams/GetParameterDefs delegate to the first submodel. SetKnobValues
+  // writes to ALL submodels so whichever becomes active already has the current state.
+  void SetKnobValues(const std::vector<float>& values) override;
+  int GetNumParams() const override;
+  std::vector<DSPParamDef> GetParameterDefs() const override;
+
 private:
   std::vector<Submodel> _submodels;
   std::atomic<size_t> _active_index{0};
