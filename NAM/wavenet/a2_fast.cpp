@@ -748,7 +748,10 @@ bool film_inactive(const nlohmann::json& layer, const char* key)
 }
 
 // =============================================================================
-// ParametricA2FastModel<Channels>
+// [Fork] BEGIN: ParametricA2FastModel<Channels>
+//
+// Fast path for ParametricWaveNet, replacing the generic Eigen WaveNet path
+// (~17× faster on Apple Silicon). Added by Fork — not in upstream NAM.
 //
 // Optimized fast path for ParametricWaveNet (A2 topology + per-layer FiLM).
 //
@@ -775,7 +778,14 @@ public:
   // Thread-safe: may be called from UI thread while process() runs on audio thread.
   void SetKnobValues(const std::vector<float>& values) override;
 
-  const std::vector<ParametricParam>& GetParameterDefs() const { return _param_defs; }
+  std::vector<DSPParamDef> GetParameterDefs() const override
+  {
+    std::vector<DSPParamDef> result;
+    result.reserve(_param_defs.size());
+    for (const auto& p : _param_defs)
+      result.push_back({p.name, p.min_val, p.max_val, p.default_val});
+    return result;
+  }
   int GetNumParams() const override { return _num_params; }
 
   void process(NAM_SAMPLE** input, NAM_SAMPLE** output, int num_frames) override;
@@ -1344,6 +1354,8 @@ void ParametricA2FastModel<Channels>::process(NAM_SAMPLE** input, NAM_SAMPLE** o
   _dc_y_prev = yp;
 }
 
+// [Fork] END: ParametricA2FastModel<Channels>
+
 // --- ParametricA2FastConfig ---
 struct ParametricA2FastConfig : public ModelConfig
 {
@@ -1513,6 +1525,7 @@ std::unique_ptr<ModelConfig> create_a2_fast_config(const nlohmann::json& config,
   return out;
 }
 
+// [Fork] Public API for parametric fast path — called only from parametric_wavenet.cpp.
 // ParametricWaveNet detector: config["layers"] is an integer (channel count), not an array.
 // All ParametricWaveNet models currently use the A2 topology, so the only check beyond
 // "channels = 3 or 8" is that a valid parametric block is present.

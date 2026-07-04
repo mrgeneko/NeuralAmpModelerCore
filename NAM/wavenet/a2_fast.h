@@ -52,6 +52,10 @@ bool is_a2_shape(const nlohmann::json& config, int* channels);
 /// \pre is_a2_shape(config, ...) returned true.
 std::unique_ptr<ModelConfig> create_a2_fast_config(const nlohmann::json& config, double sampleRate);
 
+// [Fork] Parametric A2 fast path — same ring-buffer SIMD architecture as A2FastModel
+// extended with per-layer FiLM conditioning. is_parametric_a2_shape detects the compact JSON
+// format; create_parametric_a2_fast_config returns the config that constructs the fast model.
+// Called from parametric_wavenet.cpp::create_parametric_config when NAM_ENABLE_A2_FAST is set.
 /// \brief Strict detector: returns true iff config matches the ParametricWaveNet A2 shape.
 ///
 /// Unlike is_a2_shape, this accepts the compact ParametricWaveNet JSON format where

@@ -59,6 +59,17 @@ private:
   bool mPreviousPrewarmOnReset;
 };
 
+// [Fork] Simple POD carrying per-knob metadata for polymorphic access via GetParameterDefs().
+// Mirrors nam::wavenet::ParametricParam but lives in dsp.h to avoid a circular include dependency
+// (parametric_wavenet.h → dsp.h). Populated by overrides in ParametricWaveNet and ParametricA2FastModel.
+struct DSPParamDef
+{
+  std::string name;
+  float min_val    = 0.0f;
+  float max_val    = 1.0f;
+  float default_val = 0.5f;
+};
+
 /// \brief Base class for all DSP models
 ///
 /// DSP provides the common interface for all neural network-based audio processing models.
@@ -98,11 +109,16 @@ public:
   /// \param output Output audio buffers. Same structure as input.
   /// \param num_frames Number of frames to process
   virtual void process(NAM_SAMPLE** input, NAM_SAMPLE** output, const int num_frames);
+  // [Fork] Polymorphic knob interface. Added so NAMProcessorWrapper can drive parametric
+  // models through a DSP* without knowing the concrete subclass. Non-parametric models inherit
+  // SetKnobValues/GetNumParams/GetParameterDefs as no-ops returning empty/zero.
   /// \brief Update knob values for parametric models. No-op for non-parametric models.
   /// \param values New knob values. Thread-safe: may be called while process() runs.
   virtual void SetKnobValues(const std::vector<float>&) {}
   /// \brief Return the number of knob parameters. 0 for non-parametric models.
   virtual int GetNumParams() const { return 0; }
+  /// \brief Return per-knob metadata. Empty for non-parametric models.
+  virtual std::vector<DSPParamDef> GetParameterDefs() const { return {}; }
   /// \brief Get the expected sample rate
   /// \return Expected sample rate in Hz (-1.0 if unknown)
   double GetExpectedSampleRate() const { return mExpectedSampleRate; };

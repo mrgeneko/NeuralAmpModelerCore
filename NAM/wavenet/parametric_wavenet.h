@@ -100,7 +100,7 @@ public:
   /// \brief Update knob values. May be called from any thread while process() runs.
   void SetKnobValues(const std::vector<float>& values) override;
 
-  const std::vector<ParametricParam>& GetParameterDefs() const { return _param_defs; }
+  std::vector<DSPParamDef> GetParameterDefs() const override;
   int GetNumParams() const override { return _num_params; }
 
   // Public override so ContainerModel and prewarm() both go through the DC blocker.

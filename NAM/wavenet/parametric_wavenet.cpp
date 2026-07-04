@@ -37,6 +37,15 @@ void ParametricWaveNet::SetKnobValues(const std::vector<float>& values)
     _knob_atoms[i].store(values[i], std::memory_order_relaxed);
 }
 
+std::vector<DSPParamDef> ParametricWaveNet::GetParameterDefs() const
+{
+  std::vector<DSPParamDef> result;
+  result.reserve(_param_defs.size());
+  for (const auto& p : _param_defs)
+    result.push_back({p.name, p.min_val, p.max_val, p.default_val});
+  return result;
+}
+
 void ParametricWaveNet::process(NAM_SAMPLE** inputs, NAM_SAMPLE** outputs, const int num_frames)
 {
   WaveNet::process(inputs, outputs, num_frames);
@@ -112,7 +121,7 @@ std::unique_ptr<DSP> ParametricWaveNetConfig::create(std::vector<float> weights,
 
 std::unique_ptr<ModelConfig> create_parametric_config(const nlohmann::json& config, const double sampleRate)
 {
-  // Fast path: ParametricA2FastModel replaces the generic Eigen WaveNet (~17× faster on Apple Silicon).
+  // [Fork] Fast path: ParametricA2FastModel replaces the generic Eigen WaveNet (~17× faster on Apple Silicon).
   // All ParametricWaveNet models currently use the A2 topology (channels = 3 or 8), so this catches
   // every real model. The generic path below remains available as a fallback for future architectures.
 #if defined(NAM_ENABLE_A2_FAST)
