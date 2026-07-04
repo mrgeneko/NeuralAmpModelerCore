@@ -836,6 +836,10 @@ private:
   int _num_params = 0;
   std::vector<ParametricParam> _param_defs;
   std::array<std::atomic<float>, kMaxParams> _knob_atoms{};
+  // [Fork] Per-buffer one-pole smoother — eliminates zipper noise when UI sliders move.
+  // Audio thread only; no atomic needed. Initialized to default knob value (0.5).
+  std::array<float, kMaxParams> _knob_smoothed{};
+  float _knob_smooth_coeff{0.3f}; // updated in Reset(); default covers startup before first Reset
 
   // Rechannel (1 → Channels), no bias.
   std::array<float, Channels> _rechannel_w{};
@@ -904,8 +908,10 @@ ParametricA2FastModel<Channels>::ParametricA2FastModel(std::vector<float> weight
   }
 
   // Default knob values match ParametricWaveNet constructor.
-  for (int k = 0; k < num_params && k < kMaxParams; k++)
+  for (int k = 0; k < num_params && k < kMaxParams; k++) {
     _knob_atoms[k].store(0.5f, std::memory_order_relaxed);
+    _knob_smoothed[k] = 0.5f; // smoother starts at the same default so there's no initial transient
+  }
 
   _load_weights(weights);
 
@@ -994,9 +1000,14 @@ void ParametricA2FastModel<Channels>::SetKnobValues(const std::vector<float>& va
 template <int Channels>
 void ParametricA2FastModel<Channels>::_recompute_film()
 {
+  // [Fork] One-pole smooth toward the atomic target each buffer.
+  // Eliminates zipper noise when UI sliders move; adds ~20 ms of imperceptible lag.
   float knobs[kMaxParams];
-  for (int j = 0; j < _num_params; j++)
-    knobs[j] = _knob_atoms[j].load(std::memory_order_relaxed);
+  for (int j = 0; j < _num_params; j++) {
+    float target = _knob_atoms[j].load(std::memory_order_relaxed);
+    _knob_smoothed[j] += _knob_smooth_coeff * (target - _knob_smoothed[j]);
+    knobs[j] = _knob_smoothed[j];
+  }
 
   for (int li = 0; li < kNumLayers; li++)
   {
@@ -1062,6 +1073,10 @@ void ParametricA2FastModel<Channels>::Reset(double sampleRate, int maxBufferSize
   _dc_alpha = 1.0f - 2.0f * static_cast<float>(M_PI) * 20.0f / static_cast<float>(sampleRate);
   _dc_x_prev = 0.0f;
   _dc_y_prev = 0.0f;
+  // [Fork] Per-buffer smooth coeff: 1 - exp(-bufferSize / (sampleRate * smoothTime)).
+  // 20 ms gives ~3-4 buffer transitions at 256-sample blocks — imperceptible lag, no zipper.
+  const float smoothTimeSamples = static_cast<float>(sampleRate) * 0.020f;
+  _knob_smooth_coeff = 1.0f - std::exp(-static_cast<float>(maxBufferSize) / smoothTimeSamples);
   DSP::Reset(sampleRate, maxBufferSize); // calls SetMaxBufferSize then prewarm()
 }
 

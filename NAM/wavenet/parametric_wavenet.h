@@ -136,6 +136,9 @@ private:
 
   // Atomic storage for knob values. UI thread writes, audio thread reads.
   std::array<std::atomic<float>, kMaxParams> _knob_atoms{};
+  // [Fork] Per-buffer one-pole smoother — audio thread only, no atomic needed.
+  std::array<float, kMaxParams> _knob_smoothed{};
+  float _knob_smooth_coeff{0.3f}; // updated in Reset()
 
   // DC blocker state (first-order IIR high-pass, fc ≈ 20 Hz).
   // The FiLM shift terms produce a significant DC offset at any trained knob position

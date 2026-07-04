@@ -26,8 +26,10 @@ ParametricWaveNet::ParametricWaveNet(const int in_channels,
 {
   // Safe midpoint default: every knob starts at 0.5 so the model produces audio
   // immediately without a SetKnobValues() call from the host.
-  for (int i = 0; i < _num_params && i < kMaxParams; ++i)
+  for (int i = 0; i < _num_params && i < kMaxParams; ++i) {
     _knob_atoms[i].store(0.5f, std::memory_order_relaxed);
+    _knob_smoothed[i] = 0.5f; // smoother starts at the same default — no initial transient
+  }
 }
 
 void ParametricWaveNet::SetKnobValues(const std::vector<float>& values)
@@ -79,6 +81,9 @@ void ParametricWaveNet::Reset(const double sampleRate, const int maxBufferSize)
   _dc_alpha = 1.0f - (2.0f * kPi * 20.0f / (float)sampleRate);
   _dc_x_prev = 0.0f;
   _dc_y_prev = 0.0f;
+  // [Fork] Per-buffer smooth coeff: 1 - exp(-bufferSize / (sampleRate * smoothTime)).
+  const float smoothTimeSamples = (float)sampleRate * 0.020f;
+  _knob_smooth_coeff = 1.0f - std::exp(-(float)maxBufferSize / smoothTimeSamples);
 
   WaveNet::Reset(sampleRate, maxBufferSize); // prewarm() runs here; blocker converges
 }
@@ -98,14 +103,14 @@ void ParametricWaveNet::_process_condition(const int num_frames)
   // _condition_output is what input_mixin reads in each layer — audio mixing unchanged.
   WaveNet::_process_condition(num_frames);
 
-  // Step 2: broadcast the current knob values into _film_condition.
-  // Knobs are constant across all frames in a buffer (no sample-level interpolation).
-  // _film_condition is then returned by _get_film_condition() and routed to FiLM modules
-  // by WaveNet::process() → LayerArray::Process → Layer::Process.
+  // Step 2: broadcast the current (smoothed) knob values into _film_condition.
+  // [Fork] One-pole smooth toward the atomic target each buffer to eliminate
+  // zipper noise when UI sliders move. Audio thread only — no atomic on _knob_smoothed.
   for (int k = 0; k < _num_params; ++k)
   {
-    const float val = _knob_atoms[k].load(std::memory_order_relaxed);
-    _film_condition.row(k).head(num_frames).fill(val);
+    float target = _knob_atoms[k].load(std::memory_order_relaxed);
+    _knob_smoothed[k] += _knob_smooth_coeff * (target - _knob_smoothed[k]);
+    _film_condition.row(k).head(num_frames).fill(_knob_smoothed[k]);
   }
 }
 
