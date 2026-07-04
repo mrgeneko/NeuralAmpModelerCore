@@ -365,6 +365,8 @@ private:
 
   // Head output size from each layer (head1x1.out_channels if active, else bottleneck)
   const int _head_output_size;
+  // When true, use the final layer's residual output as head input (no skip-connection accumulation)
+  const bool _use_final_layer_output_for_head;
 
   long _get_channels() const;
   // Common processing logic after head inputs are set. film_condition is threaded to every Layer::Process call.

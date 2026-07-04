@@ -214,7 +214,8 @@ std::unique_ptr<ModelConfig> create_parametric_config(const nlohmann::json& conf
     off,                   // activation_post_film
     off,                   // layer1x1_post_film
     off,                   // head1x1_post_film
-    /*film_condition_size=*/ num_params);          // knob count; sets FiLM condition_dim
+    /*film_condition_size=*/ num_params,            // knob count; sets FiLM condition_dim
+    /*use_final_layer_output_for_head=*/ true);    // Python ParametricA2 has no skip connections
 
   auto pc = std::make_unique<ParametricWaveNetConfig>();
   pc->in_channels = 1;

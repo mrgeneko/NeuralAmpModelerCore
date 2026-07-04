@@ -63,16 +63,21 @@ bool SaveWavFloat32(const char* fileName, const float* samples, size_t numSample
 
 int main(int argc, char* argv[])
 {
-  // Parse optional --slim <value> from the arguments
+  // Parse optional --slim <value> and --no-prewarm from the arguments
   double slimValue = -1.0;
   bool hasSlim = false;
+  bool noPrewarm = false;
   std::vector<char*> positionalArgs;
   positionalArgs.push_back(argv[0]);
 
   for (int i = 1; i < argc; i++)
   {
     std::string arg(argv[i]);
-    if (arg == "--slim")
+    if (arg == "--no-prewarm")
+    {
+      noPrewarm = true;
+    }
+    else if (arg == "--slim")
     {
       if (i + 1 >= argc)
       {
@@ -97,7 +102,7 @@ int main(int argc, char* argv[])
 
   if (positionalArgs.size() < 3 || positionalArgs.size() > 4)
   {
-    std::cerr << "Usage: render [--slim <0.0-1.0>] <model.nam> <input.wav> [output.wav]\n";
+    std::cerr << "Usage: render [--slim <0.0-1.0>] [--no-prewarm] <model.nam> <input.wav> [output.wav]\n";
     return 1;
   }
 
@@ -145,6 +150,11 @@ int main(int argc, char* argv[])
 
   const double sampleRate = expectedRate > 0 ? expectedRate : inputSampleRate;
   const int bufferSize = 64;
+  if (noPrewarm)
+  {
+    std::cerr << "Prewarm disabled (cold-start)\n";
+    model->SetPrewarmOnReset(false);
+  }
   model->Reset(sampleRate, bufferSize);
 
   const int inChannels = model->NumInputChannels();

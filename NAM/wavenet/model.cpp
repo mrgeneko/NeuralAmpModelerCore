@@ -386,6 +386,7 @@ nam::wavenet::detail::LayerArray::LayerArray(const LayerArrayParams& params)
 , _head_rechannel(params.head1x1_params.active ? params.head1x1_params.out_channels : params.bottleneck,
                   params.head_size, params.head_kernel_size, params.head_bias ? 1 : 0, 1, 1)
 , _head_output_size(params.head1x1_params.active ? params.head1x1_params.out_channels : params.bottleneck)
+, _use_final_layer_output_for_head(params.use_final_layer_output_for_head)
 {
   const size_t num_layers = params.dilations.size();
   for (size_t i = 0; i < num_layers; i++)
@@ -478,9 +479,10 @@ void nam::wavenet::detail::LayerArray::ProcessInner(const Eigen::MatrixXf& layer
       this->_layers[i].Process(prev_output, condition, num_frames, film_condition);
     }
 
-    // Accumulate head output from this layer
-#ifdef NAM_USE_INLINE_GEMM
+    // Accumulate head output from this layer (skip when using final layer output for head)
+    if (!_use_final_layer_output_for_head)
     {
+#ifdef NAM_USE_INLINE_GEMM
       const int total = (int)this->_head_output_size * num_frames;
       const float* __restrict__ src = this->_layers[i].GetOutputHead().data();
       float* __restrict__ dst = this->_head_inputs.data();
@@ -494,10 +496,10 @@ void nam::wavenet::detail::LayerArray::ProcessInner(const Eigen::MatrixXf& layer
       }
       for (; j < total; j++)
         dst[j] += src[j];
-    }
 #else
-    this->_head_inputs.leftCols(num_frames).noalias() += this->_layers[i].GetOutputHead().leftCols(num_frames);
+      this->_head_inputs.leftCols(num_frames).noalias() += this->_layers[i].GetOutputHead().leftCols(num_frames);
 #endif
+    }
   }
 
   // Store output from last layer - use memcpy for pure copy
@@ -512,6 +514,14 @@ void nam::wavenet::detail::LayerArray::ProcessInner(const Eigen::MatrixXf& layer
   this->_layer_outputs.leftCols(num_frames).noalias() =
     this->_layers[last_layer].GetOutputNextLayer().leftCols(num_frames);
 #endif
+
+  // When using final-layer-output mode, copy the final layer residual output to head inputs.
+  // This matches Python ParametricA2 which feeds the last layer's l1x1+residual to the head
+  // directly, with no per-layer skip-connection accumulation.
+  if (_use_final_layer_output_for_head)
+  {
+    this->_head_inputs.leftCols(num_frames).noalias() = this->_layer_outputs.leftCols(num_frames);
+  }
 
   // Process head rechannel (causal Conv1D)
   _head_rechannel.Process(this->_head_inputs, num_frames);

@@ -5,10 +5,12 @@
 // ARCHITECTURE OVERVIEW
 // =====================
 // The model always uses the A2 shape: one layer array of exactly 23 layers, with
-// channel count 3 (nano) or 8 (standard) read from config["layers"]. The only
-// structural difference from a standard A2 model is that each layer contains an
-// active activation_pre_film FiLM module whose condition input comes from knob
-// values — not from the audio signal.
+// channel count 3 (nano) or 8 (standard) read from config["layers"]. Two structural
+// differences from a standard A2 model:
+//   1. Each layer has an active activation_pre_film FiLM module conditioned on knobs.
+//   2. No per-layer skip connections: the head receives the FINAL layer's l1x1+residual
+//      output directly (use_final_layer_output_for_head=true). Standard WaveNet accumulates
+//      skip connections from all layers; Python ParametricA2 does not.
 //
 // Per-layer computation:
 //   audio → rechannel(1→C) → dilated_conv(C→C) ──┐
@@ -30,6 +32,9 @@
 //
 // WEIGHT LAYOUT (must match training code exactly)
 // =================================================
+// First, consumed by LayerArray::set_weights_ before the per-layer loop:
+//   rechannel.weight  (C floats: 1→C linear projection, no bias)
+//
 // Per layer (23 layers total), weights are consumed in this order by Layer::set_weights_:
 //   conv.weight  conv.bias  mixin.weight  l1x1.weight  l1x1.bias
 //   film.net.weight  film.net.bias

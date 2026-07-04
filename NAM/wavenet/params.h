@@ -228,7 +228,11 @@ public:
                    const _FiLMParams& _layer1x1_post_film_params_, const _FiLMParams& head1x1_post_film_params_,
                    // See LayerParams::film_condition_size. This value propagates to each LayerParams built
                    // from this object in LayerArray's constructor. Default 0 → use condition_size.
-                   const int film_condition_size_ = 0)
+                   const int film_condition_size_ = 0,
+                   // When true, LayerArray passes the final layer's residual output (l1x1+residual)
+                   // directly to the head conv instead of accumulating per-layer skip connections.
+                   // Required for ParametricWaveNet to match Python ParametricA2 architecture.
+                   const bool use_final_layer_output_for_head_ = false)
   : input_size(input_size_)
   , condition_size(condition_size_)
   , film_condition_size(film_condition_size_ != 0 ? film_condition_size_ : condition_size_)
@@ -254,6 +258,7 @@ public:
   , activation_post_film_params(activation_post_film_params_)
   , _layer1x1_post_film_params(_layer1x1_post_film_params_)
   , head1x1_post_film_params(head1x1_post_film_params_)
+  , use_final_layer_output_for_head(use_final_layer_output_for_head_)
   {
     if (head_kernel_size < 1)
     {
@@ -316,6 +321,10 @@ public:
   const _FiLMParams activation_post_film_params; ///< FiLM params after activation
   const _FiLMParams _layer1x1_post_film_params; ///< FiLM params after layer1x1 conv
   const _FiLMParams head1x1_post_film_params; ///< FiLM params after head1x1 conv
+  /// When true, the final layer's residual output (l1x1+residual) is used directly as head input
+  /// instead of accumulating per-layer skip connections (standard WaveNet). Set to true for
+  /// ParametricWaveNet to match the Python ParametricA2 architecture which has no skip connections.
+  const bool use_final_layer_output_for_head;
 };
 
 /// \brief Parameters for the optional post-stack head (matches Python ``nam.models.wavenet._head.Head``).
