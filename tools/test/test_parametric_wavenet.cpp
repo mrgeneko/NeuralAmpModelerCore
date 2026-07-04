@@ -562,46 +562,65 @@ void test_standard_wavenet_unaffected()
     assert(std::isfinite(v));
 }
 
-// Test: DC blocker reduces the model's steady-state DC during sustained silence.
-// We verify that after many silent frames the output is MUCH smaller than it was
-// at the very start (before the blocker had time to converge). This proves the
-// blocker is working without requiring an absolute threshold that depends on the
-// arbitrary weight values of the synthetic test model.
+// Test: DC blocker is already converged immediately after Reset().
+// prewarm() runs inside WaveNet::Reset(), which calls this->process() via virtual
+// dispatch. The DC blocker state must be zeroed BEFORE WaveNet::Reset() so that
+// prewarm has converged it by the time Reset() returns. If the state were zeroed
+// AFTER WaveNet::Reset(), real audio would start with a cold blocker and produce a
+// multi-second decaying-DC transient ("warbly" sound).
+//
+// We use the A2 nano (C=3) factory model because its long receptive field drives
+// prewarm to run > 1755 silent samples — enough for DC blocker convergence
+// (alpha^n < 0.01 requires n > ln(0.01)/ln(0.99738) ≈ 1755). The tiny K=1 test
+// model has a zero-sample receptive field and skips prewarm entirely.
+//
+// Comparison:
+//   (a) Reset with prewarmOnReset=false → cold blocker → full model DC in output
+//   (b) Reset with prewarmOnReset=true  → prewarm converges blocker → near-zero output
 void test_dc_blocker_removes_dc_at_silence()
 {
-  const int np = 2;
-  auto pwn = make_tiny_pwn(np, 1.0f);
+  nlohmann::json cfg;
+  cfg["layers"] = 3; // nano (C=3)
+  cfg["head_scale"] = 1.0f;
+  cfg["parametric"]["condition_size"] = 1;
+
+  auto config = nam::wavenet::create_parametric_config(cfg, 48000.0);
+  std::vector<float> weights(kA2NanoWeightCount_1param, 0.1f);
+  auto dsp = config->create(std::move(weights), 48000.0);
+  auto* pwn = dynamic_cast<nam::wavenet::ParametricWaveNet*>(dsp.get());
+  assert(pwn != nullptr);
+
   const int buf = 64;
-  pwn->Reset(48000.0, buf);
-  // Do NOT call prewarm here so we measure from a clean ring-buffer state.
-
-  // First pass: the blocker starts at zero and sees the model's full DC output.
   std::vector<NAM_SAMPLE> silence(buf, 0.0f);
-  std::vector<NAM_SAMPLE> out_first(buf, 0.0f);
-  {
-    NAM_SAMPLE* sil_ptr = silence.data();
-    NAM_SAMPLE* out_ptr = out_first.data();
-    pwn->process(&sil_ptr, &out_ptr, buf);
-  }
-  float peak_first = 0.0f;
-  for (auto v : out_first) peak_first = std::max(peak_first, std::abs((float)v));
 
-  // Run many more silent passes until the blocker has had >> 5× time-constant worth of
-  // samples (time-constant = 1/(2π·20) · 48000 ≈ 382 samples; use 6000 to be safe).
-  std::vector<NAM_SAMPLE> out_last(buf, 0.0f);
-  const int total_passes = 6000 / buf + 1;
-  for (int p = 0; p < total_passes; ++p)
-  {
-    NAM_SAMPLE* sil_ptr = silence.data();
-    NAM_SAMPLE* out_ptr = out_last.data();
-    pwn->process(&sil_ptr, &out_ptr, buf);
-  }
-  float peak_last = 0.0f;
-  for (auto v : out_last) peak_last = std::max(peak_last, std::abs((float)v));
+  // (a) Reset without prewarm — DC blocker is zeroed but not yet converged.
+  pwn->SetPrewarmOnReset(false);
+  pwn->Reset(48000.0, buf);
 
-  // The blocker must have attenuated DC by at least 99% (factor of 100).
-  assert(peak_first > 0.0f); // model must produce something initially
-  assert(peak_last < peak_first * 0.01f);
+  std::vector<NAM_SAMPLE> out_cold(buf, 0.0f);
+  {
+    NAM_SAMPLE* s = silence.data(); NAM_SAMPLE* o = out_cold.data();
+    pwn->process(&s, &o, buf);
+  }
+  float peak_cold = 0.0f;
+  for (auto v : out_cold) peak_cold = std::max(peak_cold, std::abs((float)v));
+  assert(peak_cold > 0.0f); // cold blocker passes the model's DC
+
+  // (b) Reset with prewarm (default) — blocker state zeroed BEFORE prewarm runs.
+  // prewarm processes > 1755 silent samples, converging the blocker fully.
+  pwn->SetPrewarmOnReset(true);
+  pwn->Reset(48000.0, buf);
+
+  std::vector<NAM_SAMPLE> out_warm(buf, 0.0f);
+  {
+    NAM_SAMPLE* s = silence.data(); NAM_SAMPLE* o = out_warm.data();
+    pwn->process(&s, &o, buf);
+  }
+  float peak_warm = 0.0f;
+  for (auto v : out_warm) peak_warm = std::max(peak_warm, std::abs((float)v));
+
+  // After proper prewarm the first real buffer must be at least 99% quieter.
+  assert(peak_warm < peak_cold * 0.01f);
 }
 
 // Test: DC blocker does not kill AC signal — output still changes when input changes.

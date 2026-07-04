@@ -61,13 +61,17 @@ void ParametricWaveNet::process(NAM_SAMPLE** inputs, NAM_SAMPLE** outputs, const
 
 void ParametricWaveNet::Reset(const double sampleRate, const int maxBufferSize)
 {
-  WaveNet::Reset(sampleRate, maxBufferSize);
-  // Recompute DC blocker coefficient for this sample rate (fc = 20 Hz).
-  // State is cleared to 0; prewarm() converges it before real audio starts.
+  // Reset the DC blocker BEFORE calling WaveNet::Reset().
+  // WaveNet::Reset() calls prewarm() which calls this->process() via virtual dispatch.
+  // If we reset the blocker state AFTER prewarm() runs, we discard the converged state
+  // and the blocker starts cold on the first real audio buffer — producing a long
+  // decaying-DC transient ("warbly" sound that takes several seconds to settle).
   constexpr float kPi = 3.14159265358979f;
   _dc_alpha = 1.0f - (2.0f * kPi * 20.0f / (float)sampleRate);
   _dc_x_prev = 0.0f;
   _dc_y_prev = 0.0f;
+
+  WaveNet::Reset(sampleRate, maxBufferSize); // prewarm() runs here; blocker converges
 }
 
 void ParametricWaveNet::SetMaxBufferSize(const int maxBufferSize)
