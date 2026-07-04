@@ -98,10 +98,10 @@ public:
                     int num_params, std::vector<ParametricParam> param_defs);
 
   /// \brief Update knob values. May be called from any thread while process() runs.
-  void SetKnobValues(const std::vector<float>& values);
+  void SetKnobValues(const std::vector<float>& values) override;
 
   const std::vector<ParametricParam>& GetParameterDefs() const { return _param_defs; }
-  int GetNumParams() const { return _num_params; }
+  int GetNumParams() const override { return _num_params; }
 
   // Public override so ContainerModel and prewarm() both go through the DC blocker.
   void process(NAM_SAMPLE** inputs, NAM_SAMPLE** outputs, int num_frames) override;

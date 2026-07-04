@@ -98,6 +98,11 @@ public:
   /// \param output Output audio buffers. Same structure as input.
   /// \param num_frames Number of frames to process
   virtual void process(NAM_SAMPLE** input, NAM_SAMPLE** output, const int num_frames);
+  /// \brief Update knob values for parametric models. No-op for non-parametric models.
+  /// \param values New knob values. Thread-safe: may be called while process() runs.
+  virtual void SetKnobValues(const std::vector<float>&) {}
+  /// \brief Return the number of knob parameters. 0 for non-parametric models.
+  virtual int GetNumParams() const { return 0; }
   /// \brief Get the expected sample rate
   /// \return Expected sample rate in Hz (-1.0 if unknown)
   double GetExpectedSampleRate() const { return mExpectedSampleRate; };

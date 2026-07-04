@@ -9,6 +9,7 @@
   #endif
 
   #include "a2_fast.h"
+  #include "parametric_wavenet.h"
 
   #include <algorithm>
   #include <array>
@@ -746,6 +747,623 @@ bool film_inactive(const nlohmann::json& layer, const char* key)
   return false;
 }
 
+// =============================================================================
+// ParametricA2FastModel<Channels>
+//
+// Optimized fast path for ParametricWaveNet (A2 topology + per-layer FiLM).
+//
+// Two structural differences from A2FastModel:
+//   1. FiLM (gamma * x + beta) applied after conv+mixin, before LeakyReLU.
+//      Gamma and beta are precomputed from knob atomics once per buffer.
+//   2. Head receives the FINAL LAYER's l1x1+residual output directly —
+//      no per-layer skip-connection accumulation (matches Python ParametricA2).
+//
+// Everything else (ring buffers, weight loading skeleton, head conv) is
+// identical to A2FastModel so the same throughput characteristics apply.
+// =============================================================================
+template <int Channels>
+class ParametricA2FastModel : public DSP
+{
+public:
+  static constexpr int kChannels = Channels;
+  static constexpr int kMaxParams = ParametricWaveNet::kMaxParams;
+
+  ParametricA2FastModel(std::vector<float> weights, double expected_sample_rate,
+                        int num_params, std::vector<ParametricParam> param_defs);
+  ~ParametricA2FastModel() override = default;
+
+  // Thread-safe: may be called from UI thread while process() runs on audio thread.
+  void SetKnobValues(const std::vector<float>& values) override;
+
+  const std::vector<ParametricParam>& GetParameterDefs() const { return _param_defs; }
+  int GetNumParams() const override { return _num_params; }
+
+  void process(NAM_SAMPLE** input, NAM_SAMPLE** output, int num_frames) override;
+  int GetPrewarmSamples() override { return _prewarm_samples; }
+  void Reset(double sampleRate, int maxBufferSize) override;
+
+protected:
+  void SetMaxBufferSize(int maxBufferSize) override;
+
+private:
+  struct Layer
+  {
+    int kernel_size = 0;
+    int dilation = 0;
+    int max_lookback = 0;
+    std::vector<float> conv_w; // K × Channels × Channels, col-major per tap
+    std::array<float, Channels> conv_b{};
+    std::array<float, Channels> mixin_w{};
+    std::array<float, Channels * Channels> l1x1_w{};
+    std::array<float, Channels> l1x1_b{};
+    std::vector<float> history;
+  #if NAM_A2_RING_MODE == 1
+    int pow2_size = 0;
+    int pow2_mask = 0;
+    int write_pos = 0;
+  #else
+    int history_cols = 0;
+    int write_pos = 0;
+  #endif
+  };
+
+  std::array<Layer, kNumLayers> _layers;
+
+  // Per-layer FiLM network weights.
+  // _film_net_w[li]: (2*Channels rows × _num_params cols), row-major.
+  // _film_net_b[li]: 2*Channels floats.
+  struct FilmLayer
+  {
+    std::vector<float> net_w; // 2*Channels × _num_params, row-major
+    std::vector<float> net_b; // 2*Channels
+  };
+  std::array<FilmLayer, kNumLayers> _film_layers;
+
+  // Per-layer precomputed gamma/beta (rebuilt each buffer from _knob_atoms).
+  std::array<std::array<float, Channels>, kNumLayers> _film_gamma{};
+  std::array<std::array<float, Channels>, kNumLayers> _film_beta{};
+
+  int _num_params = 0;
+  std::vector<ParametricParam> _param_defs;
+  std::array<std::atomic<float>, kMaxParams> _knob_atoms{};
+
+  // Rechannel (1 → Channels), no bias.
+  std::array<float, Channels> _rechannel_w{};
+
+  // Head conv (Channels → 1, kernel=16, bias). Col-major per tap.
+  std::array<std::array<float, Channels>, kHeadKernelSize> _head_w{};
+  float _head_b = 0.0f;
+  float _head_scale = 1.0f;
+
+  // Head ring buffer. Reads from _layer_in (final layer residual output),
+  // NOT from a skip-connection accumulator.
+  std::vector<float> _head_history;
+  #if NAM_A2_RING_MODE == 1
+  int _head_pow2_size = 0;
+  int _head_pow2_mask = 0;
+  int _head_write_pos = 0;
+  #else
+  int _head_history_cols = 0;
+  int _head_write_pos = 0;
+  #endif
+
+  // Working buffers (Channels × maxBufferSize, col-major).
+  std::vector<float> _layer_in; // layer input / residual accumulator
+  std::vector<float> _z;        // per-layer conv accumulator
+  std::vector<float> _cond;     // float32 copy of input audio
+  std::vector<float> _head_out; // float32 head output
+
+  // First-order IIR high-pass DC blocker (fc ≈ 20 Hz).
+  float _dc_alpha = 0.99738f; // 1 - 2π·20/48000; recomputed in Reset()
+  float _dc_x_prev = 0.0f;
+  float _dc_y_prev = 0.0f;
+
+  int _prewarm_samples = 0;
+
+  void _load_weights(std::vector<float>& weights);
+  // Rebuild _film_gamma/_film_beta for all layers from _knob_atoms. Audio thread only.
+  void _recompute_film();
+  void _ring_write(Layer& L, int num_frames);
+  // Write _layer_in (final layer residual) into _head_history ring.
+  void _head_ring_write(int num_frames);
+
+  template <int KernelSize>
+  void _layer_forward_k(Layer& L, int li, const float* cond, int num_frames);
+  void _layer_forward(int li, const float* cond, int num_frames);
+  void _head_forward(float* output, int num_frames);
+};
+
+// --- Construction ---
+template <int Channels>
+ParametricA2FastModel<Channels>::ParametricA2FastModel(std::vector<float> weights,
+                                                        double expected_sample_rate,
+                                                        int num_params,
+                                                        std::vector<ParametricParam> param_defs)
+: DSP(/*in_channels=*/1, /*out_channels=*/1, expected_sample_rate)
+, _num_params(num_params)
+, _param_defs(std::move(param_defs))
+{
+  for (int i = 0; i < kNumLayers; i++)
+  {
+    _layers[i].kernel_size = kKernelSizes[i];
+    _layers[i].dilation = kDilations[i];
+    _layers[i].max_lookback = (kKernelSizes[i] - 1) * kDilations[i];
+    _layers[i].conv_w.assign(static_cast<size_t>(kKernelSizes[i]) * Channels * Channels, 0.0f);
+    _film_layers[i].net_w.assign(static_cast<size_t>(2 * Channels) * num_params, 0.0f);
+    _film_layers[i].net_b.assign(static_cast<size_t>(2 * Channels), 0.0f);
+  }
+
+  // Default knob values match ParametricWaveNet constructor.
+  for (int k = 0; k < num_params && k < kMaxParams; k++)
+    _knob_atoms[k].store(0.5f, std::memory_order_relaxed);
+
+  _load_weights(weights);
+
+  int prewarm = 0;
+  for (int i = 0; i < kNumLayers; i++)
+    prewarm += _layers[i].max_lookback;
+  prewarm += kHeadKernelSize - 1;
+  _prewarm_samples = prewarm;
+}
+
+// --- Weight loader ---
+// Order (must match Layer::set_weights_ with activation_pre_film active):
+//   rechannel.weight (C floats)
+//   per layer × 23: conv.w + conv.b + mixin.w + l1x1.w + l1x1.b + film.net.w + film.net.b
+//   head.w + head.b + head_scale
+template <int Channels>
+void ParametricA2FastModel<Channels>::_load_weights(std::vector<float>& weights)
+{
+  auto it = weights.begin();
+  const auto end = weights.end();
+  auto take = [&]() -> float {
+    if (it == end)
+      throw std::runtime_error("ParametricA2FastModel: weight stream exhausted");
+    return *it++;
+  };
+
+  // Rechannel: 1 → Channels, no bias.
+  for (int i = 0; i < Channels; i++)
+    _rechannel_w[i] = take();
+
+  for (int li = 0; li < kNumLayers; li++)
+  {
+    Layer& L = _layers[li];
+    const int K = L.kernel_size;
+
+    // Conv1D: Channels → Channels, kernel=K, bias. Col-major per tap.
+    for (int i = 0; i < Channels; i++)
+      for (int j = 0; j < Channels; j++)
+        for (int k = 0; k < K; k++)
+          L.conv_w[k * Channels * Channels + j * Channels + i] = take();
+    for (int i = 0; i < Channels; i++)
+      L.conv_b[i] = take();
+
+    // Input mixin: 1 → Channels, no bias.
+    for (int i = 0; i < Channels; i++)
+      L.mixin_w[i] = take();
+
+    // layer1x1: Channels → Channels, with bias. Col-major.
+    for (int i = 0; i < Channels; i++)
+      for (int j = 0; j < Channels; j++)
+        L.l1x1_w[j * Channels + i] = take();
+    for (int i = 0; i < Channels; i++)
+      L.l1x1_b[i] = take();
+
+    // FiLM net: Conv1x1(num_params → 2*Channels, bias).
+    // Read order: for i in 2*Channels: for j in num_params.
+    for (int i = 0; i < 2 * Channels; i++)
+      for (int j = 0; j < _num_params; j++)
+        _film_layers[li].net_w[i * _num_params + j] = take();
+    for (int i = 0; i < 2 * Channels; i++)
+      _film_layers[li].net_b[i] = take();
+  }
+
+  // Head rechannel: Channels → 1, kernel=16, bias. Col-major per tap.
+  for (int j = 0; j < Channels; j++)
+    for (int k = 0; k < kHeadKernelSize; k++)
+      _head_w[k][j] = take();
+  _head_b = take();
+  _head_scale = take();
+
+  if (it != end)
+    throw std::runtime_error("ParametricA2FastModel: " + std::to_string(std::distance(it, end))
+                             + " trailing weights");
+}
+
+// --- SetKnobValues ---
+template <int Channels>
+void ParametricA2FastModel<Channels>::SetKnobValues(const std::vector<float>& values)
+{
+  const int n = std::min(static_cast<int>(values.size()), _num_params);
+  for (int k = 0; k < n; k++)
+    _knob_atoms[k].store(values[k], std::memory_order_relaxed);
+}
+
+// --- _recompute_film: rebuild gamma/beta from knob atomics (audio thread, once per buffer) ---
+template <int Channels>
+void ParametricA2FastModel<Channels>::_recompute_film()
+{
+  float knobs[kMaxParams];
+  for (int j = 0; j < _num_params; j++)
+    knobs[j] = _knob_atoms[j].load(std::memory_order_relaxed);
+
+  for (int li = 0; li < kNumLayers; li++)
+  {
+    const float* w = _film_layers[li].net_w.data(); // (2C × num_params) row-major
+    const float* b = _film_layers[li].net_b.data();
+    for (int i = 0; i < Channels; i++)
+    {
+      float g = b[i];
+      float beta = b[Channels + i];
+      for (int j = 0; j < _num_params; j++)
+      {
+        g    += w[i           * _num_params + j] * knobs[j];
+        beta += w[(Channels + i) * _num_params + j] * knobs[j];
+      }
+      _film_gamma[li][i] = g;
+      _film_beta[li][i]  = beta;
+    }
+  }
+}
+
+// --- Buffer sizing ---
+template <int Channels>
+void ParametricA2FastModel<Channels>::SetMaxBufferSize(int maxBufferSize)
+{
+  DSP::SetMaxBufferSize(maxBufferSize);
+
+  _layer_in.assign(static_cast<size_t>(Channels) * maxBufferSize, 0.0f);
+  _z.assign(static_cast<size_t>(Channels) * maxBufferSize, 0.0f);
+  _cond.assign(static_cast<size_t>(maxBufferSize), 0.0f);
+  _head_out.assign(static_cast<size_t>(maxBufferSize), 0.0f);
+
+  for (auto& L : _layers)
+  {
+  #if NAM_A2_RING_MODE == 1
+    L.pow2_size = next_pow2(L.max_lookback + maxBufferSize);
+    L.pow2_mask = L.pow2_size - 1;
+    L.history.assign(static_cast<size_t>(Channels) * (L.pow2_size + maxBufferSize), 0.0f);
+    L.write_pos = L.max_lookback;
+  #else
+    L.history_cols = 2 * L.max_lookback + maxBufferSize;
+    L.history.assign(static_cast<size_t>(Channels) * L.history_cols, 0.0f);
+    L.write_pos = L.max_lookback;
+  #endif
+  }
+
+  const int head_lookback = kHeadKernelSize - 1;
+  #if NAM_A2_RING_MODE == 1
+  _head_pow2_size = next_pow2(head_lookback + maxBufferSize);
+  _head_pow2_mask = _head_pow2_size - 1;
+  _head_history.assign(static_cast<size_t>(Channels) * (_head_pow2_size + maxBufferSize), 0.0f);
+  _head_write_pos = head_lookback;
+  #else
+  _head_history_cols = 2 * head_lookback + maxBufferSize;
+  _head_history.assign(static_cast<size_t>(Channels) * _head_history_cols, 0.0f);
+  _head_write_pos = head_lookback;
+  #endif
+}
+
+// --- Reset (recomputes DC blocker coefficient for new sample rate) ---
+template <int Channels>
+void ParametricA2FastModel<Channels>::Reset(double sampleRate, int maxBufferSize)
+{
+  _dc_alpha = 1.0f - 2.0f * static_cast<float>(M_PI) * 20.0f / static_cast<float>(sampleRate);
+  _dc_x_prev = 0.0f;
+  _dc_y_prev = 0.0f;
+  DSP::Reset(sampleRate, maxBufferSize); // calls SetMaxBufferSize then prewarm()
+}
+
+// --- Ring write (identical to A2FastModel) ---
+template <int Channels>
+void ParametricA2FastModel<Channels>::_ring_write(Layer& L, int num_frames)
+{
+  #if NAM_A2_RING_MODE == 1
+  const int mbs = GetMaxBufferSize();
+  float* const hist = L.history.data();
+  const float* const src = _layer_in.data();
+  const int wp = L.write_pos;
+  const int first = std::min(num_frames, L.pow2_size - wp);
+  std::memcpy(hist + static_cast<size_t>(wp) * Channels, src, static_cast<size_t>(first) * Channels * sizeof(float));
+  if (first < num_frames)
+    std::memcpy(hist, src + static_cast<size_t>(first) * Channels,
+                static_cast<size_t>(num_frames - first) * Channels * sizeof(float));
+  std::memcpy(hist + static_cast<size_t>(L.pow2_size) * Channels, hist,
+              static_cast<size_t>(mbs) * Channels * sizeof(float));
+  L.write_pos = (wp + num_frames) & L.pow2_mask;
+  #else
+  if (L.write_pos + num_frames > L.history_cols)
+  {
+    const int keep = L.max_lookback;
+    std::memmove(L.history.data(), L.history.data() + static_cast<size_t>(L.write_pos - keep) * Channels,
+                 static_cast<size_t>(keep) * Channels * sizeof(float));
+    L.write_pos = keep;
+  }
+  std::memcpy(L.history.data() + static_cast<size_t>(L.write_pos) * Channels, _layer_in.data(),
+              static_cast<size_t>(num_frames) * Channels * sizeof(float));
+  L.write_pos += num_frames;
+  #endif
+}
+
+// --- Head ring write: source is _layer_in (final layer residual, NOT a skip sum) ---
+template <int Channels>
+void ParametricA2FastModel<Channels>::_head_ring_write(int num_frames)
+{
+  #if NAM_A2_RING_MODE == 1
+  const int mbs = GetMaxBufferSize();
+  float* const hist = _head_history.data();
+  const float* const src = _layer_in.data(); // <-- final layer residual output
+  const int wp = _head_write_pos;
+  const int first = std::min(num_frames, _head_pow2_size - wp);
+  std::memcpy(hist + static_cast<size_t>(wp) * Channels, src, static_cast<size_t>(first) * Channels * sizeof(float));
+  if (first < num_frames)
+    std::memcpy(hist, src + static_cast<size_t>(first) * Channels,
+                static_cast<size_t>(num_frames - first) * Channels * sizeof(float));
+  std::memcpy(hist + static_cast<size_t>(_head_pow2_size) * Channels, hist,
+              static_cast<size_t>(mbs) * Channels * sizeof(float));
+  _head_write_pos = (wp + num_frames) & _head_pow2_mask;
+  #else
+  const int keep = kHeadKernelSize - 1;
+  if (_head_write_pos + num_frames > _head_history_cols)
+  {
+    std::memmove(_head_history.data(),
+                 _head_history.data() + static_cast<size_t>(_head_write_pos - keep) * Channels,
+                 static_cast<size_t>(keep) * Channels * sizeof(float));
+    _head_write_pos = keep;
+  }
+  std::memcpy(_head_history.data() + static_cast<size_t>(_head_write_pos) * Channels, _layer_in.data(),
+              static_cast<size_t>(num_frames) * Channels * sizeof(float));
+  _head_write_pos += num_frames;
+  #endif
+}
+
+// --- Per-layer forward: FiLM applied, no skip-connection accumulation ---
+template <int Channels>
+template <int KernelSize>
+void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const float* cond, int num_frames)
+{
+  constexpr int K = KernelSize;
+  const int D = L.dilation;
+  #if NAM_A2_RING_MODE == 1
+  const int mask = L.pow2_mask;
+  auto tap_base_phys = [&](int taps_back) { return (L.write_pos - num_frames - taps_back * D) & mask; };
+  #else
+  const int base = L.write_pos - num_frames;
+  auto tap_base_phys = [&](int taps_back) { return base - taps_back * D; };
+  #endif
+
+  if constexpr (Channels == 3)
+  {
+    // Preload per-layer FiLM coefficients (constant across all frames in this buffer).
+    const float g0 = _film_gamma[li][0], g1 = _film_gamma[li][1], g2 = _film_gamma[li][2];
+    const float bt0 = _film_beta[li][0], bt1 = _film_beta[li][1], bt2 = _film_beta[li][2];
+
+    float* z = _z.data();
+
+    // Tap 0: seed z with conv_b.
+    {
+      const float* wk = &L.conv_w[0];
+      const int tap_base = tap_base_phys(K - 1);
+      const float w0=wk[0],w1=wk[1],w2=wk[2],w3=wk[3],w4=wk[4],w5=wk[5],w6=wk[6],w7=wk[7],w8=wk[8];
+      const float cb0=L.conv_b[0],cb1=L.conv_b[1],cb2=L.conv_b[2];
+      for (int f = 0; f < num_frames; f++)
+      {
+        const float* src = &L.history[static_cast<size_t>(tap_base + f) * 3];
+        float* zf = z + static_cast<size_t>(f) * 3;
+        zf[0] = cb0 + w0*src[0] + w3*src[1] + w6*src[2];
+        zf[1] = cb1 + w1*src[0] + w4*src[1] + w7*src[2];
+        zf[2] = cb2 + w2*src[0] + w5*src[1] + w8*src[2];
+      }
+    }
+
+    // Taps 1..K-2: accumulate.
+    for (int k = 1; k < K - 1; k++)
+    {
+      const float* wk = &L.conv_w[static_cast<size_t>(k) * 9];
+      const int tap_base = tap_base_phys(K - 1 - k);
+      const float w0=wk[0],w1=wk[1],w2=wk[2],w3=wk[3],w4=wk[4],w5=wk[5],w6=wk[6],w7=wk[7],w8=wk[8];
+      for (int f = 0; f < num_frames; f++)
+      {
+        const float* src = &L.history[static_cast<size_t>(tap_base + f) * 3];
+        float* zf = z + static_cast<size_t>(f) * 3;
+        zf[0] += w0*src[0] + w3*src[1] + w6*src[2];
+        zf[1] += w1*src[0] + w4*src[1] + w7*src[2];
+        zf[2] += w2*src[0] + w5*src[1] + w8*src[2];
+      }
+    }
+
+    // Final tap + mixin + FiLM + LeakyReLU + l1x1 residual (no head_sum accumulation).
+    const float* wk_last = &L.conv_w[static_cast<size_t>(K - 1) * 9];
+    const int tap_base_last = tap_base_phys(0);
+    const float cw0=wk_last[0],cw1=wk_last[1],cw2=wk_last[2];
+    const float cw3=wk_last[3],cw4=wk_last[4],cw5=wk_last[5];
+    const float cw6=wk_last[6],cw7=wk_last[7],cw8=wk_last[8];
+    const float mw0=L.mixin_w[0],mw1=L.mixin_w[1],mw2=L.mixin_w[2];
+    const float lw00=L.l1x1_w[0],lw01=L.l1x1_w[1],lw02=L.l1x1_w[2];
+    const float lw10=L.l1x1_w[3],lw11=L.l1x1_w[4],lw12=L.l1x1_w[5];
+    const float lw20=L.l1x1_w[6],lw21=L.l1x1_w[7],lw22=L.l1x1_w[8];
+    const float lb0=L.l1x1_b[0],lb1=L.l1x1_b[1],lb2=L.l1x1_b[2];
+    for (int f = 0; f < num_frames; f++)
+    {
+      const float* src = &L.history[static_cast<size_t>(tap_base_last + f) * 3];
+      const float* zf = z + static_cast<size_t>(f) * 3;
+      // Final tap GEMV.
+      float a0 = zf[0] + cw0*src[0] + cw3*src[1] + cw6*src[2];
+      float a1 = zf[1] + cw1*src[0] + cw4*src[1] + cw7*src[2];
+      float a2 = zf[2] + cw2*src[0] + cw5*src[1] + cw8*src[2];
+      // Mixin.
+      const float cf = cond[f];
+      a0 += mw0 * cf;
+      a1 += mw1 * cf;
+      a2 += mw2 * cf;
+      // FiLM: gamma * (conv+mixin) + beta — constant per buffer, 6 FMAs.
+      a0 = g0 * a0 + bt0;
+      a1 = g1 * a1 + bt1;
+      a2 = g2 * a2 + bt2;
+      // LeakyReLU.
+      a0 = (a0 >= 0.0f) ? a0 : a0 * kLeakySlope;
+      a1 = (a1 >= 0.0f) ? a1 : a1 * kLeakySlope;
+      a2 = (a2 >= 0.0f) ? a2 : a2 * kLeakySlope;
+      // layer1x1 residual (no head_sum accumulation — parametric uses final layer output).
+      float* lin = &_layer_in[static_cast<size_t>(f) * 3];
+      lin[0] += lb0 + lw00*a0 + lw10*a1 + lw20*a2;
+      lin[1] += lb1 + lw01*a0 + lw11*a1 + lw21*a2;
+      lin[2] += lb2 + lw02*a0 + lw12*a1 + lw22*a2;
+    }
+  }
+  else
+  {
+    using MatCC  = Eigen::Matrix<float, Channels, Channels>;
+    using MatCDyn= Eigen::Matrix<float, Channels, Eigen::Dynamic>;
+    using VecC   = Eigen::Matrix<float, Channels, 1>;
+    using RowDyn = Eigen::Matrix<float, 1, Eigen::Dynamic>;
+
+    Eigen::Map<const VecC>   conv_b_vec(L.conv_b.data());
+    Eigen::Map<const VecC>   mixin_vec(L.mixin_w.data());
+    Eigen::Map<const MatCC>  l1x1_mat(L.l1x1_w.data());
+    Eigen::Map<const VecC>   l1x1_b_vec(L.l1x1_b.data());
+    Eigen::Map<const RowDyn> cond_row(cond, 1, num_frames);
+    Eigen::Map<const VecC>   gamma_vec(_film_gamma[li].data());
+    Eigen::Map<const VecC>   beta_vec(_film_beta[li].data());
+
+    Eigen::Map<MatCDyn> ztile(_z.data(), Channels, num_frames);
+    Eigen::Map<MatCDyn> lin_block(_layer_in.data(), Channels, num_frames);
+
+    ztile.setZero();
+
+    // Conv: one Channels×Channels × Channels×N GEMM per tap.
+    for (int k = 0; k < K; k++)
+    {
+      const int tap_base = tap_base_phys(K - 1 - k);
+      Eigen::Map<const MatCC>  W(&L.conv_w[static_cast<size_t>(k) * Channels * Channels]);
+      Eigen::Map<const MatCDyn> input_block(&L.history[static_cast<size_t>(tap_base) * Channels], Channels, num_frames);
+      ztile.noalias() += W * input_block;
+    }
+
+    // Post-conv: bias, mixin, FiLM, LeakyReLU, 1x1 residual.
+    ztile.colwise() += conv_b_vec;
+    ztile.noalias() += mixin_vec * cond_row;
+    // FiLM: scale each row c by gamma[c], then add beta[c].
+    ztile = gamma_vec.asDiagonal() * ztile; // O(C×N) — diagonal×dense
+    ztile.colwise() += beta_vec;
+    // LeakyReLU.
+    ztile = (ztile.array() < 0.0f).select(ztile.array() * kLeakySlope, ztile.array());
+    // layer1x1 residual (no skip-connection accumulation).
+    lin_block.noalias() += l1x1_mat * ztile;
+    lin_block.colwise() += l1x1_b_vec;
+  }
+}
+
+template <int Channels>
+void ParametricA2FastModel<Channels>::_layer_forward(int li, const float* cond, int num_frames)
+{
+  Layer& L = _layers[li];
+  _ring_write(L, num_frames);
+  switch (L.kernel_size)
+  {
+    case 6:  _layer_forward_k<6>(L, li, cond, num_frames); break;
+    case 15: _layer_forward_k<15>(L, li, cond, num_frames); break;
+    default: throw std::runtime_error("ParametricA2FastModel: unexpected kernel_size "
+                                      + std::to_string(L.kernel_size));
+  }
+}
+
+// --- Head (identical to A2FastModel) ---
+template <int Channels>
+void ParametricA2FastModel<Channels>::_head_forward(float* output, int num_frames)
+{
+  _head_ring_write(num_frames);
+  #if NAM_A2_RING_MODE == 1
+  const int mask = _head_pow2_mask;
+  auto col_of = [&](int f, int k) { return (_head_write_pos - num_frames + f - (kHeadKernelSize - 1 - k)) & mask; };
+  #else
+  const int base = _head_write_pos - num_frames;
+  auto col_of = [&](int f, int k) { return base + f - (kHeadKernelSize - 1 - k); };
+  #endif
+
+  for (int f = 0; f < num_frames; f++)
+  {
+    float y = _head_b;
+    for (int k = 0; k < kHeadKernelSize; k++)
+    {
+      const int col = col_of(f, k);
+      const float* src = &_head_history[static_cast<size_t>(col) * Channels];
+      const float* wk = _head_w[k].data();
+      for (int b = 0; b < Channels; b++)
+        y += wk[b] * src[b];
+    }
+    output[f] = y * _head_scale;
+  }
+}
+
+// --- process ---
+template <int Channels>
+void ParametricA2FastModel<Channels>::process(NAM_SAMPLE** input, NAM_SAMPLE** output, int num_frames)
+{
+  if (num_frames > GetMaxBufferSize())
+    SetMaxBufferSize(num_frames);
+
+  // Rebuild per-layer gamma/beta from knob atomics (cheap: 23 × num_params × 2C FMAs).
+  _recompute_film();
+
+  const NAM_SAMPLE* in0 = input[0];
+  NAM_SAMPLE* out0 = output[0];
+
+  // Rechannel + float cond copy.
+  float* cond = _cond.data();
+  for (int f = 0; f < num_frames; f++)
+  {
+    const float x = static_cast<float>(in0[f]);
+    cond[f] = x;
+    float* lin = &_layer_in[static_cast<size_t>(f) * Channels];
+    for (int c = 0; c < Channels; c++)
+      lin[c] = _rechannel_w[c] * x;
+  }
+
+  // Run all 23 layers. After this, _layer_in holds the final layer's l1x1+residual output.
+  for (int li = 0; li < kNumLayers; li++)
+    _layer_forward(li, cond, num_frames);
+
+  // Head: reads from _layer_in via _head_ring_write (called inside _head_forward).
+  float* head_out = _head_out.data();
+  _head_forward(head_out, num_frames);
+
+  // DC blocker: first-order IIR HP, fc ≈ 20 Hz. Matches ParametricWaveNet::process().
+  float xp = _dc_x_prev, yp = _dc_y_prev;
+  const float alpha = _dc_alpha;
+  for (int f = 0; f < num_frames; f++)
+  {
+    const float xi = head_out[f];
+    const float yi = xi - xp + alpha * yp;
+    xp = xi;
+    yp = yi;
+    out0[f] = static_cast<NAM_SAMPLE>(yi);
+  }
+  _dc_x_prev = xp;
+  _dc_y_prev = yp;
+}
+
+// --- ParametricA2FastConfig ---
+struct ParametricA2FastConfig : public ModelConfig
+{
+  int channels = 0;
+  int num_params = 0;
+  std::vector<ParametricParam> param_defs;
+
+  std::unique_ptr<DSP> create(std::vector<float> weights, double sampleRate) override
+  {
+    if (channels == 3)
+      return std::make_unique<ParametricA2FastModel<3>>(std::move(weights), sampleRate, num_params,
+                                                        param_defs);
+    if (channels == 8)
+      return std::make_unique<ParametricA2FastModel<8>>(std::move(weights), sampleRate, num_params,
+                                                        param_defs);
+    throw std::runtime_error("ParametricA2FastConfig: unsupported channel count "
+                             + std::to_string(channels));
+  }
+};
+
 } // namespace
 
 // -----------------------------------------------------------------------------
@@ -892,6 +1510,68 @@ std::unique_ptr<ModelConfig> create_a2_fast_config(const nlohmann::json& config,
     throw std::runtime_error("create_a2_fast_config: config does not match A2 shape");
   auto out = std::make_unique<A2FastConfig>();
   out->channels = ch;
+  return out;
+}
+
+// ParametricWaveNet detector: config["layers"] is an integer (channel count), not an array.
+// All ParametricWaveNet models currently use the A2 topology, so the only check beyond
+// "channels = 3 or 8" is that a valid parametric block is present.
+bool is_parametric_a2_shape(const nlohmann::json& config, int* channels, int* num_params)
+{
+  auto layers_it = config.find("layers");
+  if (layers_it == config.end() || !layers_it->is_number_integer())
+    return false;
+  const int ch = layers_it->get<int>();
+  if (ch != 3 && ch != 8)
+    return false;
+
+  auto param_it = config.find("parametric");
+  if (param_it == config.end() || !param_it->is_object())
+    return false;
+  const int np = param_it->value("condition_size", 0);
+  if (np <= 0 || np > ParametricWaveNet::kMaxParams)
+    return false;
+
+  if (channels)
+    *channels = ch;
+  if (num_params)
+    *num_params = np;
+  return true;
+}
+
+std::unique_ptr<ModelConfig> create_parametric_a2_fast_config(const nlohmann::json& config,
+                                                               double sampleRate)
+{
+  (void)sampleRate;
+  int ch = 0, np = 0;
+  if (!is_parametric_a2_shape(config, &ch, &np))
+    throw std::runtime_error("create_parametric_a2_fast_config: config does not match parametric A2 shape");
+
+  // Validate required fields (match the slow path's error contract).
+  if (!config.contains("head_scale"))
+    throw std::runtime_error("ParametricWaveNet: missing 'head_scale'");
+  if (!config.contains("parametric"))
+    throw std::runtime_error("ParametricWaveNet: missing 'parametric' block");
+
+  const auto& param_block = config["parametric"];
+  std::vector<ParametricParam> param_defs;
+  if (param_block.contains("parameters"))
+  {
+    for (const auto& p : param_block["parameters"])
+    {
+      ParametricParam pd;
+      pd.name        = p.value("name", "");
+      pd.min_val     = p.value("min", p.value("minimum", 0.0f));
+      pd.max_val     = p.value("max", p.value("maximum", 1.0f));
+      pd.default_val = p.value("default", 0.5f);
+      param_defs.push_back(std::move(pd));
+    }
+  }
+
+  auto out = std::make_unique<ParametricA2FastConfig>();
+  out->channels   = ch;
+  out->num_params = np;
+  out->param_defs = std::move(param_defs);
   return out;
 }
 

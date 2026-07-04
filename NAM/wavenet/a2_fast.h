@@ -52,6 +52,21 @@ bool is_a2_shape(const nlohmann::json& config, int* channels);
 /// \pre is_a2_shape(config, ...) returned true.
 std::unique_ptr<ModelConfig> create_a2_fast_config(const nlohmann::json& config, double sampleRate);
 
+/// \brief Strict detector: returns true iff config matches the ParametricWaveNet A2 shape.
+///
+/// Unlike is_a2_shape, this accepts the compact ParametricWaveNet JSON format where
+/// config["layers"] is an integer (channel count), not an array. Checks that channels
+/// are 3 or 8 and that a valid "parametric" block is present.
+/// \param config      The "config" sub-object from a ParametricWaveNet model entry.
+/// \param channels    Out-param set to 3 or 8 on match.
+/// \param num_params  Out-param set to condition_size on match.
+/// \return true if the config can be dispatched to the parametric A2 fast path.
+bool is_parametric_a2_shape(const nlohmann::json& config, int* channels, int* num_params);
+
+/// \brief Build a ModelConfig that instantiates the parametric A2 fast path.
+/// \pre is_parametric_a2_shape(config, ...) returned true.
+std::unique_ptr<ModelConfig> create_parametric_a2_fast_config(const nlohmann::json& config, double sampleRate);
+
 } // namespace a2_fast
 } // namespace wavenet
 } // namespace nam

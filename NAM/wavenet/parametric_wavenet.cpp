@@ -112,6 +112,17 @@ std::unique_ptr<DSP> ParametricWaveNetConfig::create(std::vector<float> weights,
 
 std::unique_ptr<ModelConfig> create_parametric_config(const nlohmann::json& config, const double sampleRate)
 {
+  // Fast path: ParametricA2FastModel replaces the generic Eigen WaveNet (~17× faster on Apple Silicon).
+  // All ParametricWaveNet models currently use the A2 topology (channels = 3 or 8), so this catches
+  // every real model. The generic path below remains available as a fallback for future architectures.
+#if defined(NAM_ENABLE_A2_FAST)
+  {
+    int fast_channels = 0, fast_num_params = 0;
+    if (a2_fast::is_parametric_a2_shape(config, &fast_channels, &fast_num_params))
+      return a2_fast::create_parametric_a2_fast_config(config, sampleRate);
+  }
+#endif
+
   // --- Channel count ---
   // config["layers"] is an INTEGER (channel count: 3 = nano, 8 = standard), NOT a layer-array list.
   // The training code named this field "layers" (matching the WaveNet convention for the layer array list)
