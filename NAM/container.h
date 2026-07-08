@@ -18,6 +18,9 @@ namespace container
 struct Submodel
 {
   double max_value;
+  /// Representative model size (e.g. WaveNet channel count) for UI display via
+  /// GetAllowedSizes(); 0 if the submodel's config didn't expose one.
+  int channels = 0;
   std::unique_ptr<DSP> model;
 };
 
@@ -39,6 +42,7 @@ public:
   void Reset(const double sampleRate, const int maxBufferSize) override;
   void SetPrewarmOnReset(const bool prewarmOnReset) override;
   void SetSlimmableSize(const double val) override;
+  std::vector<int> GetAllowedSizes() const override;
   int GetPrewarmSamples() override;
 
   // [Fork] Propagate knob API through the container to its submodels.

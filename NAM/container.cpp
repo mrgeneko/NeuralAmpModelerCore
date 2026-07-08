@@ -122,6 +122,15 @@ int ContainerModel::GetPrewarmSamples()
   return _submodels[active_index].model->GetPrewarmSamples();
 }
 
+std::vector<int> ContainerModel::GetAllowedSizes() const
+{
+  std::vector<int> sizes;
+  sizes.reserve(_submodels.size());
+  for (const auto& sm : _submodels)
+    sizes.push_back(sm.channels);
+  return sizes;
+}
+
 // [Fork] Knob API delegation -- parametric containers have uniform knob count across submodels.
 void ContainerModel::SetKnobValues(const std::vector<float>& values)
 {
@@ -161,10 +170,22 @@ std::unique_ptr<DSP> ContainerConfig::create(std::vector<float> weights, double 
     double max_val = entry.at("max_value").get<double>();
     const auto& model_json = entry.at("model");
 
+    // Extract a representative channel count for UI display (the model-size picker),
+    // independent of the submodel's concrete DSP type. Falls back to 0 (unknown) if
+    // the config doesn't expose a "channels" field in the expected shape -- the UI
+    // degrades to a generic label rather than failing.
+    int channels = 0;
+    if (model_json.contains("config") && model_json["config"].contains("layers"))
+    {
+      const auto& layers = model_json["config"]["layers"];
+      if (layers.is_array() && !layers.empty() && layers.back().contains("channels"))
+        channels = layers.back()["channels"].get<int>();
+    }
+
     // Each submodel is a full NAM model spec (has architecture, config, weights, etc.)
     auto dsp = get_dsp(model_json);
 
-    submodels.push_back({max_val, std::move(dsp)});
+    submodels.push_back({max_val, channels, std::move(dsp)});
   }
 
   return std::make_unique<ContainerModel>(std::move(submodels), sampleRate);

@@ -65,8 +65,8 @@ std::unique_ptr<nam::container::ContainerModel> build_counting_container(Countin
   large = large_model.get();
 
   std::vector<nam::container::Submodel> submodels;
-  submodels.push_back({0.5, std::move(small_model)});
-  submodels.push_back({1.0, std::move(large_model)});
+  submodels.push_back({0.5, 3, std::move(small_model)});
+  submodels.push_back({1.0, 8, std::move(large_model)});
 
   return std::make_unique<nam::container::ContainerModel>(std::move(submodels), 48000.0);
 }
