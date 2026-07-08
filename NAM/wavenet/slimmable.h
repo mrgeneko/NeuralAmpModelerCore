@@ -60,6 +60,7 @@ public:
   void Reset(const double sampleRate, const int maxBufferSize) override;
   void SetPrewarmOnReset(const bool prewarmOnReset) override;
   void SetSlimmableSize(const double val) override;
+  std::vector<int> GetAllowedSizes() const override;
 
 protected:
   int GetPrewarmSamples() override { return 0; }
