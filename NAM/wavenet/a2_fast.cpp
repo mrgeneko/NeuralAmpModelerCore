@@ -697,6 +697,8 @@ struct A2FastConfig : public ModelConfig
   {
     if (channels == 3)
       return std::make_unique<A2FastModel<3>>(std::move(weights), sampleRate);
+    if (channels == 4)
+      return std::make_unique<A2FastModel<4>>(std::move(weights), sampleRate);
     if (channels == 8)
       return std::make_unique<A2FastModel<8>>(std::move(weights), sampleRate);
     throw std::runtime_error("A2FastConfig: unsupported channel count " + std::to_string(channels));
@@ -1383,6 +1385,9 @@ struct ParametricA2FastConfig : public ModelConfig
     if (channels == 3)
       return std::make_unique<ParametricA2FastModel<3>>(std::move(weights), sampleRate, num_params,
                                                         param_defs);
+    if (channels == 4)
+      return std::make_unique<ParametricA2FastModel<4>>(std::move(weights), sampleRate, num_params,
+                                                        param_defs);
     if (channels == 8)
       return std::make_unique<ParametricA2FastModel<8>>(std::move(weights), sampleRate, num_params,
                                                         param_defs);
@@ -1429,7 +1434,7 @@ bool is_a2_shape(const nlohmann::json& config, int* channels)
   const int bn = la.value("bottleneck", 0);
   if (ch != bn)
     return false;
-  if (ch != 3 && ch != 8)
+  if (ch != 3 && ch != 4 && ch != 8)
     return false;
 
   // kernel_sizes must match kKernelSizes exactly
@@ -1543,14 +1548,14 @@ std::unique_ptr<ModelConfig> create_a2_fast_config(const nlohmann::json& config,
 // [Fork] Public API for parametric fast path — called only from parametric_wavenet.cpp.
 // ParametricWaveNet detector: config["layers"] is an integer (channel count), not an array.
 // All ParametricWaveNet models currently use the A2 topology, so the only check beyond
-// "channels = 3 or 8" is that a valid parametric block is present.
+// "channels in the supported fast-path set" is that a valid parametric block is present.
 bool is_parametric_a2_shape(const nlohmann::json& config, int* channels, int* num_params)
 {
   auto layers_it = config.find("layers");
   if (layers_it == config.end() || !layers_it->is_number_integer())
     return false;
   const int ch = layers_it->get<int>();
-  if (ch != 3 && ch != 8)
+  if (ch != 3 && ch != 4 && ch != 8)
     return false;
 
   auto param_it = config.find("parametric");

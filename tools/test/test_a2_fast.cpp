@@ -201,10 +201,41 @@ void test_detector_accepts_nonstandard_head_scale()
 
 void test_detector_rejects_wrong_channels()
 {
+  // 5 is outside the supported fast-path set {3, 4, 8}.
   auto cfg = build_a2_config(3);
-  cfg["layers"][0]["channels"] = 4;
-  cfg["layers"][0]["bottleneck"] = 4;
+  cfg["layers"][0]["channels"] = 5;
+  cfg["layers"][0]["bottleneck"] = 5;
   assert(!nam::wavenet::a2_fast::is_a2_shape(cfg, nullptr));
+}
+
+void test_detector_matches_medium()
+{
+  auto cfg = build_a2_config(4);
+  int ch = 0;
+  assert(nam::wavenet::a2_fast::is_a2_shape(cfg, &ch));
+  assert(ch == 4);
+}
+
+void test_parametric_detector_matches_supported_widths()
+{
+  for (int channels : {3, 4, 8})
+  {
+    nlohmann::json cfg;
+    cfg["layers"] = channels;
+    cfg["head_scale"] = 1.0f;
+    cfg["parametric"]["condition_size"] = 1;
+    int ch = 0, np = 0;
+    assert(nam::wavenet::a2_fast::is_parametric_a2_shape(cfg, &ch, &np));
+    assert(ch == channels);
+    assert(np == 1);
+  }
+
+  // 5 is outside the supported fast-path set {3, 4, 8}.
+  nlohmann::json cfg;
+  cfg["layers"] = 5;
+  cfg["head_scale"] = 1.0f;
+  cfg["parametric"]["condition_size"] = 1;
+  assert(!nam::wavenet::a2_fast::is_parametric_a2_shape(cfg, nullptr, nullptr));
 }
 
 void test_detector_rejects_wrong_kernel_sizes()
@@ -261,6 +292,11 @@ void test_matches_generic(int channels)
 void test_matches_generic_nano()
 {
   test_matches_generic(3);
+}
+
+void test_matches_generic_medium()
+{
+  test_matches_generic(4);
 }
 
 void test_matches_generic_standard()
@@ -326,6 +362,11 @@ void test_process_realtime_safe(int channels)
 void test_process_realtime_safe_nano()
 {
   test_process_realtime_safe(3);
+}
+
+void test_process_realtime_safe_medium()
+{
+  test_process_realtime_safe(4);
 }
 
 void test_process_realtime_safe_standard()

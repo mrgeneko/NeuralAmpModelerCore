@@ -1,8 +1,10 @@
 #pragma once
 
-// Specialized WaveNet fast path for the A2 standard (Channels=8) and
-// A2 nano (Channels=3) models. Shares the same architecture shape; only
-// the channel count differs.
+// Specialized WaveNet fast path for the A2 standard (Channels=8), A2 nano
+// (Channels=3), and intermediate (Channels=4) models. Shares the same
+// architecture shape; only the channel count differs. Channels==3 uses a
+// hand-unrolled small-GEMV kernel; all other supported widths (4, 8) use
+// a generic Eigen fixed-size-matrix path (see a2_fast.cpp).
 //
 // When NAM_ENABLE_A2_FAST is defined at build time, wavenet::create_config
 // consults is_a2_shape() on every incoming WaveNet config and, on match,
@@ -44,7 +46,7 @@ inline constexpr std::array<int, kNumLayers> kDilations = {
 
 /// \brief Strict detector: returns true iff config matches the A2 shape.
 /// \param config   The "config" sub-object from a .nam WaveNet entry.
-/// \param channels Out-param set to 3 (A2 nano) or 8 (A2 standard) on match.
+/// \param channels Out-param set to 3 (A2 nano), 4, or 8 (A2 standard) on match.
 /// \return true if every architectural knob matches the A2 signature exactly.
 bool is_a2_shape(const nlohmann::json& config, int* channels);
 
@@ -60,9 +62,9 @@ std::unique_ptr<ModelConfig> create_a2_fast_config(const nlohmann::json& config,
 ///
 /// Unlike is_a2_shape, this accepts the compact ParametricWaveNet JSON format where
 /// config["layers"] is an integer (channel count), not an array. Checks that channels
-/// are 3 or 8 and that a valid "parametric" block is present.
+/// are 3, 4, or 8 and that a valid "parametric" block is present.
 /// \param config      The "config" sub-object from a ParametricWaveNet model entry.
-/// \param channels    Out-param set to 3 or 8 on match.
+/// \param channels    Out-param set to 3, 4, or 8 on match.
 /// \param num_params  Out-param set to condition_size on match.
 /// \return true if the config can be dispatched to the parametric A2 fast path.
 bool is_parametric_a2_shape(const nlohmann::json& config, int* channels, int* num_params);
