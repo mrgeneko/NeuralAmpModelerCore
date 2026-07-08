@@ -171,9 +171,10 @@ void test_config_parse_missing_layers_throws()
 
 void test_config_parse_invalid_channel_count_throws()
 {
-  // Only 3 (nano) and 8 (standard) are valid
+  // Only positive channel counts are valid; 3/8 take a fast path, others (e.g. 4, 5)
+  // fall back to the generic construction path -- but 0/negative is never valid.
   nlohmann::json cfg;
-  cfg["layers"] = 5; // invalid
+  cfg["layers"] = 0; // invalid
   cfg["head_scale"] = 1.0f;
   cfg["parametric"]["condition_size"] = 2;
 
@@ -187,6 +188,24 @@ void test_config_parse_invalid_channel_count_throws()
     threw = true;
   }
   assert(threw);
+}
+
+void test_config_parse_intermediate_channel_count_does_not_throw()
+{
+  // Regression test: channels outside {3, 8} must fall back to the generic
+  // (non-fast-path) construction, not be rejected outright. Covers a new
+  // intermediate training width between nano (3) and standard (8).
+  for (int channels : {4, 5, 6})
+  {
+    nlohmann::json cfg;
+    cfg["layers"] = channels;
+    cfg["head_scale"] = 1.0f;
+    cfg["parametric"]["condition_size"] = 1;
+    cfg["parametric"]["parameters"] = {{{"name", "drive"}, {"minimum", 0.0f}, {"maximum", 1.0f}, {"default", 0.5f}}};
+
+    auto config = nam::wavenet::create_parametric_config(cfg, 48000.0);
+    assert(config != nullptr);
+  }
 }
 
 void test_config_parse_missing_head_scale_throws()

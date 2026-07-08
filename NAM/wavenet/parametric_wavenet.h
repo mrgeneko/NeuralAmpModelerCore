@@ -4,9 +4,12 @@
 //
 // ARCHITECTURE OVERVIEW
 // =====================
-// The model always uses the A2 shape: one layer array of exactly 23 layers, with
-// channel count 3 (nano) or 8 (standard) read from config["layers"]. Two structural
-// differences from a standard A2 model:
+// The model always uses the A2 shape: one layer array of exactly 23 layers, with an
+// arbitrary positive channel count read from config["layers"]. Channels 3 (nano) and
+// 8 (standard) route through a hand-optimized fast path (a2_fast.h, ~17x faster on
+// Apple Silicon); any other width (e.g. a new intermediate size) falls back to the
+// generic Eigen-based construction here, which is topology-agnostic with respect to
+// channel count. Two structural differences from a standard A2 model:
 //   1. Each layer has an active activation_pre_film FiLM module conditioned on knobs.
 //   2. No per-layer skip connections: the head receives the FINAL layer's l1x1+residual
 //      output directly (use_final_layer_output_for_head=true). Standard WaveNet accumulates
@@ -173,7 +176,7 @@ struct ParametricWaveNetConfig : public ModelConfig
 ///
 /// Called by SlimmableContainer (and any other dispatcher) when it encounters a
 /// submodel with architecture == "ParametricWaveNet". Reads:
-///   config["layers"]           — int, channel count (3 = nano, 8 = standard)
+///   config["layers"]           — int, channel count (positive; 3/8 use a fast path)
 ///   config["head_scale"]       — float
 ///   config["parametric"]       — object:
 ///     ["condition_size"]       — int, number of knobs

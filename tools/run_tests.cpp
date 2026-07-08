@@ -355,6 +355,7 @@ int main()
   test_parametric_wavenet::test_config_parse_valid_json();
   test_parametric_wavenet::test_config_parse_missing_layers_throws();
   test_parametric_wavenet::test_config_parse_invalid_channel_count_throws();
+  test_parametric_wavenet::test_config_parse_intermediate_channel_count_does_not_throw();
   test_parametric_wavenet::test_config_parse_missing_head_scale_throws();
   test_parametric_wavenet::test_config_parse_missing_parametric_block_throws();
   test_parametric_wavenet::test_config_parse_missing_condition_size_throws();

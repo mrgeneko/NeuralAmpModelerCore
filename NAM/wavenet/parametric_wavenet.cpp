@@ -127,8 +127,9 @@ std::unique_ptr<DSP> ParametricWaveNetConfig::create(std::vector<float> weights,
 std::unique_ptr<ModelConfig> create_parametric_config(const nlohmann::json& config, const double sampleRate)
 {
   // [Fork] Fast path: ParametricA2FastModel replaces the generic Eigen WaveNet (~17× faster on Apple Silicon).
-  // All ParametricWaveNet models currently use the A2 topology (channels = 3 or 8), so this catches
-  // every real model. The generic path below remains available as a fallback for future architectures.
+  // The hand-optimized fast-path kernels only cover the original A2 topology (channels = 3 or 8);
+  // is_parametric_a2_shape() returns false for any other channel count, and the generic path below
+  // handles it instead (slower, but topology-agnostic -- nothing below depends on a specific width).
 #if defined(NAM_ENABLE_A2_FAST)
   {
     int fast_channels = 0, fast_num_params = 0;
@@ -138,16 +139,18 @@ std::unique_ptr<ModelConfig> create_parametric_config(const nlohmann::json& conf
 #endif
 
   // --- Channel count ---
-  // config["layers"] is an INTEGER (channel count: 3 = nano, 8 = standard), NOT a layer-array list.
-  // The training code named this field "layers" (matching the WaveNet convention for the layer array list)
-  // but in ParametricWaveNet it means channel width. Layer depth is always kNumLayers = 23.
+  // config["layers"] is an INTEGER (channel count), NOT a layer-array list. The training code named
+  // this field "layers" (matching the WaveNet convention for the layer array list) but in
+  // ParametricWaveNet it means channel width. Layer depth is always kNumLayers = 23, independent of
+  // channel count. 3 and 8 take the fast path above; any other positive width falls through to the
+  // generic Eigen-based construction below.
   if (!config.contains("layers") || !config["layers"].is_number_integer())
-    throw std::runtime_error("ParametricWaveNet: config['layers'] must be an integer (channel count 3 or 8)");
+    throw std::runtime_error("ParametricWaveNet: config['layers'] must be an integer (channel count)");
   const int channels = config["layers"].get<int>();
-  if (channels != 3 && channels != 8)
+  if (channels <= 0)
   {
     std::ostringstream ss;
-    ss << "ParametricWaveNet: 'layers' (channel count) must be 3 (nano) or 8 (standard), got " << channels;
+    ss << "ParametricWaveNet: 'layers' (channel count) must be positive, got " << channels;
     throw std::runtime_error(ss.str());
   }
 
