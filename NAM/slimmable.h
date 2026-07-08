@@ -1,6 +1,6 @@
 #pragma once
 
-#include <vector>
+#include <vector> // [Fork] for GetAllowedSizes()
 
 namespace nam
 {
@@ -22,6 +22,7 @@ public:
   /// Not real-time safe
   virtual void SetSlimmableSize(const double val) = 0;
 
+  // [Fork] BEGIN: GetAllowedSizes()
   /// \brief The discrete sizes a caller may select between, sorted ascending
   ///
   /// The interpretation is model-specific (e.g. channel counts). Hosts use
@@ -29,6 +30,7 @@ public:
   /// fixed two-way (min/max) choice. Empty when the model exposes no
   /// discrete size list (e.g. a purely continuous or single-array model).
   virtual std::vector<int> GetAllowedSizes() const { return {}; }
+  // [Fork] END: GetAllowedSizes()
 };
 
 } // namespace nam

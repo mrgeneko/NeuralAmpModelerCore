@@ -124,20 +124,12 @@ std::unique_ptr<DSP> ParametricWaveNetConfig::create(std::vector<float> weights,
 
 // Config parser ===============================================================
 
-std::unique_ptr<ModelConfig> create_parametric_config(const nlohmann::json& config, const double sampleRate)
+// [Fork] BEGIN: generic construction factored out of create_parametric_config so
+// tests can build the reference (non-fast-path) model directly, independent of whether
+// NAM_ENABLE_A2_FAST is defined -- mirrors how the non-parametric a2_fast tests call
+// wavenet::parse_config_json() directly to get a reference WaveNet.
+std::unique_ptr<ModelConfig> create_parametric_config_generic(const nlohmann::json& config, const double sampleRate)
 {
-  // [Fork] Fast path: ParametricA2FastModel replaces the generic Eigen WaveNet (~17× faster on Apple Silicon).
-  // The hand-optimized fast-path kernels only cover the original A2 topology (channels = 3 or 8);
-  // is_parametric_a2_shape() returns false for any other channel count, and the generic path below
-  // handles it instead (slower, but topology-agnostic -- nothing below depends on a specific width).
-#if defined(NAM_ENABLE_A2_FAST)
-  {
-    int fast_channels = 0, fast_num_params = 0;
-    if (a2_fast::is_parametric_a2_shape(config, &fast_channels, &fast_num_params))
-      return a2_fast::create_parametric_a2_fast_config(config, sampleRate);
-  }
-#endif
-
   // --- Channel count ---
   // config["layers"] is an INTEGER (channel count), NOT a layer-array list. The training code named
   // this field "layers" (matching the WaveNet convention for the layer array list) but in
@@ -147,12 +139,15 @@ std::unique_ptr<ModelConfig> create_parametric_config(const nlohmann::json& conf
   if (!config.contains("layers") || !config["layers"].is_number_integer())
     throw std::runtime_error("ParametricWaveNet: config['layers'] must be an integer (channel count)");
   const int channels = config["layers"].get<int>();
+  // [Fork] BEGIN: widened from "must be 3 or 8" to "must be positive" -- the
+  // construction below never depended on a specific width, only the fast path above does.
   if (channels <= 0)
   {
     std::ostringstream ss;
     ss << "ParametricWaveNet: 'layers' (channel count) must be positive, got " << channels;
     throw std::runtime_error(ss.str());
   }
+  // [Fork] END
 
   // --- Head scale ---
   if (!config.contains("head_scale"))
@@ -253,6 +248,27 @@ std::unique_ptr<ModelConfig> create_parametric_config(const nlohmann::json& conf
   pc->param_defs = std::move(param_defs);
   return pc;
 }
+// [Fork] END: create_parametric_config_generic
+
+// [Fork] BEGIN: create_parametric_config -- fast path, falling back to the generic
+// construction above.
+std::unique_ptr<ModelConfig> create_parametric_config(const nlohmann::json& config, const double sampleRate)
+{
+  // Fast path: ParametricA2FastModel replaces the generic Eigen WaveNet (~17x faster on
+  // Apple Silicon). The hand-optimized fast-path kernels only cover a curated set of
+  // channel widths (3, 4, 8); is_parametric_a2_shape() returns false for any other
+  // channel count, and the generic path below handles it instead (slower, but
+  // topology-agnostic -- nothing in it depends on a specific width).
+#if defined(NAM_ENABLE_A2_FAST)
+  {
+    int fast_channels = 0, fast_num_params = 0;
+    if (a2_fast::is_parametric_a2_shape(config, &fast_channels, &fast_num_params))
+      return a2_fast::create_parametric_a2_fast_config(config, sampleRate);
+  }
+#endif
+  return create_parametric_config_generic(config, sampleRate);
+}
+// [Fork] END: create_parametric_config
 
 // Auto-registration ===========================================================
 

@@ -552,6 +552,148 @@ void A2FastModel<Channels>::_layer_forward_k(Layer& L, const float* cond, int nu
       lin[2] += lb2 + lw02 * a0 + lw12 * a1 + lw22 * a2;
     }
   }
+  // [Fork] BEGIN: hand-unrolled Channels==4 kernel, mirrors the Channels==3 branch
+  // above (same tap-major full-block strategy) widened from a 3x3 GEMV (9 weights/tap) to
+  // a 4x4 GEMV (16 weights/tap, 4 accumulators). Weight indexing is the same column-major
+  // convention: w[j*Channels + i] for output row i, input col j. Verified numerically
+  // against the generic WaveNet reference by test_matches_generic_medium.
+  else if constexpr (Channels == 4)
+  {
+    float* z = _z.data();
+
+    // Tap 0: seed z with conv_b (saves the memset-to-zero pass) and fold in
+    // the first tap's FMAs.
+    {
+      const float* wk = &L.conv_w[0];
+      const int tap_base = tap_base_phys(K - 1);
+      const float w0 = wk[0], w1 = wk[1], w2 = wk[2], w3 = wk[3];
+      const float w4 = wk[4], w5 = wk[5], w6 = wk[6], w7 = wk[7];
+      const float w8 = wk[8], w9 = wk[9], w10 = wk[10], w11 = wk[11];
+      const float w12 = wk[12], w13 = wk[13], w14 = wk[14], w15 = wk[15];
+      const float cb0 = L.conv_b[0], cb1 = L.conv_b[1], cb2 = L.conv_b[2], cb3 = L.conv_b[3];
+      for (int f = 0; f < num_frames; f++)
+      {
+        const float* src = &L.history[static_cast<size_t>(tap_base + f) * 4];
+        float a0 = cb0 + w0 * src[0];
+        float a1 = cb1 + w1 * src[0];
+        float a2 = cb2 + w2 * src[0];
+        float a3 = cb3 + w3 * src[0];
+        a0 += w4 * src[1];
+        a1 += w5 * src[1];
+        a2 += w6 * src[1];
+        a3 += w7 * src[1];
+        a0 += w8 * src[2];
+        a1 += w9 * src[2];
+        a2 += w10 * src[2];
+        a3 += w11 * src[2];
+        a0 += w12 * src[3];
+        a1 += w13 * src[3];
+        a2 += w14 * src[3];
+        a3 += w15 * src[3];
+        float* zf = z + static_cast<size_t>(f) * 4;
+        zf[0] = a0;
+        zf[1] = a1;
+        zf[2] = a2;
+        zf[3] = a3;
+      }
+    }
+
+    // Taps 1..K-2: accumulate into z with the same unrolled inner kernel.
+    for (int k = 1; k < K - 1; k++)
+    {
+      const float* wk = &L.conv_w[static_cast<size_t>(k) * 16];
+      const int tap_base = tap_base_phys(K - 1 - k);
+      const float w0 = wk[0], w1 = wk[1], w2 = wk[2], w3 = wk[3];
+      const float w4 = wk[4], w5 = wk[5], w6 = wk[6], w7 = wk[7];
+      const float w8 = wk[8], w9 = wk[9], w10 = wk[10], w11 = wk[11];
+      const float w12 = wk[12], w13 = wk[13], w14 = wk[14], w15 = wk[15];
+      for (int f = 0; f < num_frames; f++)
+      {
+        const float* src = &L.history[static_cast<size_t>(tap_base + f) * 4];
+        float* zf = z + static_cast<size_t>(f) * 4;
+        float a0 = zf[0] + w0 * src[0];
+        float a1 = zf[1] + w1 * src[0];
+        float a2 = zf[2] + w2 * src[0];
+        float a3 = zf[3] + w3 * src[0];
+        a0 += w4 * src[1];
+        a1 += w5 * src[1];
+        a2 += w6 * src[1];
+        a3 += w7 * src[1];
+        a0 += w8 * src[2];
+        a1 += w9 * src[2];
+        a2 += w10 * src[2];
+        a3 += w11 * src[2];
+        a0 += w12 * src[3];
+        a1 += w13 * src[3];
+        a2 += w14 * src[3];
+        a3 += w15 * src[3];
+        zf[0] = a0;
+        zf[1] = a1;
+        zf[2] = a2;
+        zf[3] = a3;
+      }
+    }
+
+    // Final tap (K-1, offset 0) fully inlined with the post-conv tail.
+    const float* wk_last = &L.conv_w[static_cast<size_t>(K - 1) * 16];
+    const int tap_base_last = tap_base_phys(0);
+    const float cw0 = wk_last[0], cw1 = wk_last[1], cw2 = wk_last[2], cw3 = wk_last[3];
+    const float cw4 = wk_last[4], cw5 = wk_last[5], cw6 = wk_last[6], cw7 = wk_last[7];
+    const float cw8 = wk_last[8], cw9 = wk_last[9], cw10 = wk_last[10], cw11 = wk_last[11];
+    const float cw12 = wk_last[12], cw13 = wk_last[13], cw14 = wk_last[14], cw15 = wk_last[15];
+    const float mw0 = L.mixin_w[0], mw1 = L.mixin_w[1], mw2 = L.mixin_w[2], mw3 = L.mixin_w[3];
+    // layer1x1 col-major: lw[b*4 + c] is weight from bottleneck b to output c.
+    const float lw00 = L.l1x1_w[0], lw01 = L.l1x1_w[1], lw02 = L.l1x1_w[2], lw03 = L.l1x1_w[3];
+    const float lw10 = L.l1x1_w[4], lw11 = L.l1x1_w[5], lw12 = L.l1x1_w[6], lw13 = L.l1x1_w[7];
+    const float lw20 = L.l1x1_w[8], lw21 = L.l1x1_w[9], lw22 = L.l1x1_w[10], lw23 = L.l1x1_w[11];
+    const float lw30 = L.l1x1_w[12], lw31 = L.l1x1_w[13], lw32 = L.l1x1_w[14], lw33 = L.l1x1_w[15];
+    const float lb0 = L.l1x1_b[0], lb1 = L.l1x1_b[1], lb2 = L.l1x1_b[2], lb3 = L.l1x1_b[3];
+    for (int f = 0; f < num_frames; f++)
+    {
+      const float* src = &L.history[static_cast<size_t>(tap_base_last + f) * 4];
+      const float* zf_mem = z + static_cast<size_t>(f) * 4;
+      // Final tap GEMV.
+      float a0 = zf_mem[0] + cw0 * src[0];
+      float a1 = zf_mem[1] + cw1 * src[0];
+      float a2 = zf_mem[2] + cw2 * src[0];
+      float a3 = zf_mem[3] + cw3 * src[0];
+      a0 += cw4 * src[1];
+      a1 += cw5 * src[1];
+      a2 += cw6 * src[1];
+      a3 += cw7 * src[1];
+      a0 += cw8 * src[2];
+      a1 += cw9 * src[2];
+      a2 += cw10 * src[2];
+      a3 += cw11 * src[2];
+      a0 += cw12 * src[3];
+      a1 += cw13 * src[3];
+      a2 += cw14 * src[3];
+      a3 += cw15 * src[3];
+      // Mixin + LeakyReLU.
+      const float cf = cond[f];
+      a0 += mw0 * cf;
+      a1 += mw1 * cf;
+      a2 += mw2 * cf;
+      a3 += mw3 * cf;
+      a0 = (a0 >= 0.0f) ? a0 : a0 * kLeakySlope;
+      a1 = (a1 >= 0.0f) ? a1 : a1 * kLeakySlope;
+      a2 = (a2 >= 0.0f) ? a2 : a2 * kLeakySlope;
+      a3 = (a3 >= 0.0f) ? a3 : a3 * kLeakySlope;
+      // Head sum accumulate.
+      float* hsum = &_head_sum[static_cast<size_t>(f) * 4];
+      hsum[0] += a0;
+      hsum[1] += a1;
+      hsum[2] += a2;
+      hsum[3] += a3;
+      // layer1x1 residual.
+      float* lin = &_layer_in[static_cast<size_t>(f) * 4];
+      lin[0] += lb0 + lw00 * a0 + lw10 * a1 + lw20 * a2 + lw30 * a3;
+      lin[1] += lb1 + lw01 * a0 + lw11 * a1 + lw21 * a2 + lw31 * a3;
+      lin[2] += lb2 + lw02 * a0 + lw12 * a1 + lw22 * a2 + lw32 * a3;
+      lin[3] += lb3 + lw03 * a0 + lw13 * a1 + lw23 * a2 + lw33 * a3;
+    }
+  }
+  // [Fork] END: hand-unrolled Channels==4 kernel
   else
   {
     // Use Eigen's tuned 8x8 × 8xN GEMM for the whole block at once. Unlike a
@@ -697,8 +839,10 @@ struct A2FastConfig : public ModelConfig
   {
     if (channels == 3)
       return std::make_unique<A2FastModel<3>>(std::move(weights), sampleRate);
+    // [Fork] BEGIN: intermediate width
     if (channels == 4)
       return std::make_unique<A2FastModel<4>>(std::move(weights), sampleRate);
+    // [Fork] END
     if (channels == 8)
       return std::make_unique<A2FastModel<8>>(std::move(weights), sampleRate);
     throw std::runtime_error("A2FastConfig: unsupported channel count " + std::to_string(channels));
@@ -1239,6 +1383,107 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       lin[2] += lb2 + lw02*a0 + lw12*a1 + lw22*a2;
     }
   }
+  // [Fork] BEGIN: hand-unrolled Channels==4 kernel, mirrors the Channels==3 branch
+  // above (adds FiLM gamma/beta vs. the non-parametric A2FastModel version) widened from a
+  // 3x3 GEMV (9 weights/tap) to a 4x4 GEMV (16 weights/tap, 4 accumulators). Same
+  // column-major weight convention: w[j*Channels + i] for output row i, input col j.
+  // Verified numerically against the generic ParametricWaveNet reference by
+  // test_parametric_matches_generic_medium.
+  else if constexpr (Channels == 4)
+  {
+    // Preload per-layer FiLM coefficients (constant across all frames in this buffer).
+    const float g0 = _film_gamma[li][0], g1 = _film_gamma[li][1], g2 = _film_gamma[li][2], g3 = _film_gamma[li][3];
+    const float bt0 = _film_beta[li][0], bt1 = _film_beta[li][1], bt2 = _film_beta[li][2], bt3 = _film_beta[li][3];
+
+    float* z = _z.data();
+
+    // Tap 0: seed z with conv_b.
+    {
+      const float* wk = &L.conv_w[0];
+      const int tap_base = tap_base_phys(K - 1);
+      const float w0 = wk[0], w1 = wk[1], w2 = wk[2], w3 = wk[3];
+      const float w4 = wk[4], w5 = wk[5], w6 = wk[6], w7 = wk[7];
+      const float w8 = wk[8], w9 = wk[9], w10 = wk[10], w11 = wk[11];
+      const float w12 = wk[12], w13 = wk[13], w14 = wk[14], w15 = wk[15];
+      const float cb0 = L.conv_b[0], cb1 = L.conv_b[1], cb2 = L.conv_b[2], cb3 = L.conv_b[3];
+      for (int f = 0; f < num_frames; f++)
+      {
+        const float* src = &L.history[static_cast<size_t>(tap_base + f) * 4];
+        float* zf = z + static_cast<size_t>(f) * 4;
+        zf[0] = cb0 + w0 * src[0] + w4 * src[1] + w8 * src[2] + w12 * src[3];
+        zf[1] = cb1 + w1 * src[0] + w5 * src[1] + w9 * src[2] + w13 * src[3];
+        zf[2] = cb2 + w2 * src[0] + w6 * src[1] + w10 * src[2] + w14 * src[3];
+        zf[3] = cb3 + w3 * src[0] + w7 * src[1] + w11 * src[2] + w15 * src[3];
+      }
+    }
+
+    // Taps 1..K-2: accumulate.
+    for (int k = 1; k < K - 1; k++)
+    {
+      const float* wk = &L.conv_w[static_cast<size_t>(k) * 16];
+      const int tap_base = tap_base_phys(K - 1 - k);
+      const float w0 = wk[0], w1 = wk[1], w2 = wk[2], w3 = wk[3];
+      const float w4 = wk[4], w5 = wk[5], w6 = wk[6], w7 = wk[7];
+      const float w8 = wk[8], w9 = wk[9], w10 = wk[10], w11 = wk[11];
+      const float w12 = wk[12], w13 = wk[13], w14 = wk[14], w15 = wk[15];
+      for (int f = 0; f < num_frames; f++)
+      {
+        const float* src = &L.history[static_cast<size_t>(tap_base + f) * 4];
+        float* zf = z + static_cast<size_t>(f) * 4;
+        zf[0] += w0 * src[0] + w4 * src[1] + w8 * src[2] + w12 * src[3];
+        zf[1] += w1 * src[0] + w5 * src[1] + w9 * src[2] + w13 * src[3];
+        zf[2] += w2 * src[0] + w6 * src[1] + w10 * src[2] + w14 * src[3];
+        zf[3] += w3 * src[0] + w7 * src[1] + w11 * src[2] + w15 * src[3];
+      }
+    }
+
+    // Final tap + mixin + FiLM + LeakyReLU + l1x1 residual (no head_sum accumulation).
+    const float* wk_last = &L.conv_w[static_cast<size_t>(K - 1) * 16];
+    const int tap_base_last = tap_base_phys(0);
+    const float cw0 = wk_last[0], cw1 = wk_last[1], cw2 = wk_last[2], cw3 = wk_last[3];
+    const float cw4 = wk_last[4], cw5 = wk_last[5], cw6 = wk_last[6], cw7 = wk_last[7];
+    const float cw8 = wk_last[8], cw9 = wk_last[9], cw10 = wk_last[10], cw11 = wk_last[11];
+    const float cw12 = wk_last[12], cw13 = wk_last[13], cw14 = wk_last[14], cw15 = wk_last[15];
+    const float mw0 = L.mixin_w[0], mw1 = L.mixin_w[1], mw2 = L.mixin_w[2], mw3 = L.mixin_w[3];
+    const float lw00 = L.l1x1_w[0], lw01 = L.l1x1_w[1], lw02 = L.l1x1_w[2], lw03 = L.l1x1_w[3];
+    const float lw10 = L.l1x1_w[4], lw11 = L.l1x1_w[5], lw12 = L.l1x1_w[6], lw13 = L.l1x1_w[7];
+    const float lw20 = L.l1x1_w[8], lw21 = L.l1x1_w[9], lw22 = L.l1x1_w[10], lw23 = L.l1x1_w[11];
+    const float lw30 = L.l1x1_w[12], lw31 = L.l1x1_w[13], lw32 = L.l1x1_w[14], lw33 = L.l1x1_w[15];
+    const float lb0 = L.l1x1_b[0], lb1 = L.l1x1_b[1], lb2 = L.l1x1_b[2], lb3 = L.l1x1_b[3];
+    for (int f = 0; f < num_frames; f++)
+    {
+      const float* src = &L.history[static_cast<size_t>(tap_base_last + f) * 4];
+      const float* zf = z + static_cast<size_t>(f) * 4;
+      // Final tap GEMV.
+      float a0 = zf[0] + cw0 * src[0] + cw4 * src[1] + cw8 * src[2] + cw12 * src[3];
+      float a1 = zf[1] + cw1 * src[0] + cw5 * src[1] + cw9 * src[2] + cw13 * src[3];
+      float a2 = zf[2] + cw2 * src[0] + cw6 * src[1] + cw10 * src[2] + cw14 * src[3];
+      float a3 = zf[3] + cw3 * src[0] + cw7 * src[1] + cw11 * src[2] + cw15 * src[3];
+      // Mixin.
+      const float cf = cond[f];
+      a0 += mw0 * cf;
+      a1 += mw1 * cf;
+      a2 += mw2 * cf;
+      a3 += mw3 * cf;
+      // FiLM: gamma * (conv+mixin) + beta.
+      a0 = g0 * a0 + bt0;
+      a1 = g1 * a1 + bt1;
+      a2 = g2 * a2 + bt2;
+      a3 = g3 * a3 + bt3;
+      // LeakyReLU.
+      a0 = (a0 >= 0.0f) ? a0 : a0 * kLeakySlope;
+      a1 = (a1 >= 0.0f) ? a1 : a1 * kLeakySlope;
+      a2 = (a2 >= 0.0f) ? a2 : a2 * kLeakySlope;
+      a3 = (a3 >= 0.0f) ? a3 : a3 * kLeakySlope;
+      // layer1x1 residual (no head_sum accumulation — parametric uses final layer output).
+      float* lin = &_layer_in[static_cast<size_t>(f) * 4];
+      lin[0] += lb0 + lw00 * a0 + lw10 * a1 + lw20 * a2 + lw30 * a3;
+      lin[1] += lb1 + lw01 * a0 + lw11 * a1 + lw21 * a2 + lw31 * a3;
+      lin[2] += lb2 + lw02 * a0 + lw12 * a1 + lw22 * a2 + lw32 * a3;
+      lin[3] += lb3 + lw03 * a0 + lw13 * a1 + lw23 * a2 + lw33 * a3;
+    }
+  }
+  // [Fork] END: hand-unrolled Channels==4 kernel
   else
   {
     using MatCC  = Eigen::Matrix<float, Channels, Channels>;
@@ -1385,7 +1630,7 @@ struct ParametricA2FastConfig : public ModelConfig
     if (channels == 3)
       return std::make_unique<ParametricA2FastModel<3>>(std::move(weights), sampleRate, num_params,
                                                         param_defs);
-    if (channels == 4)
+    if (channels == 4) // [Fork] intermediate width
       return std::make_unique<ParametricA2FastModel<4>>(std::move(weights), sampleRate, num_params,
                                                         param_defs);
     if (channels == 8)
@@ -1434,7 +1679,7 @@ bool is_a2_shape(const nlohmann::json& config, int* channels)
   const int bn = la.value("bottleneck", 0);
   if (ch != bn)
     return false;
-  if (ch != 3 && ch != 4 && ch != 8)
+  if (ch != 3 && ch != 4 && ch != 8) // [Fork] widened from "3 or 8" to also allow 4
     return false;
 
   // kernel_sizes must match kKernelSizes exactly

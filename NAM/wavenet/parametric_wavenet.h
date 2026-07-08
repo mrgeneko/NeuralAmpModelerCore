@@ -183,5 +183,12 @@ struct ParametricWaveNetConfig : public ModelConfig
 ///     ["parameters"]           — array of {name, min, max, default}  (keys "min"/"max")
 std::unique_ptr<ModelConfig> create_parametric_config(const nlohmann::json& config, double sampleRate);
 
+// [Fork] BEGIN: exposed for tests -- builds the generic (non-fast-path) model
+// directly, so tests can numerically compare it against the fast path regardless of
+// whether NAM_ENABLE_A2_FAST is defined. Same contract as create_parametric_config,
+// minus the fast-path dispatch.
+std::unique_ptr<ModelConfig> create_parametric_config_generic(const nlohmann::json& config, double sampleRate);
+// [Fork] END
+
 } // namespace wavenet
 } // namespace nam

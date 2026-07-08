@@ -22,6 +22,7 @@
   #include "NAM/dsp.h"
   #include "NAM/wavenet/a2_fast.h"
   #include "NAM/wavenet/model.h"
+  #include "NAM/wavenet/parametric_wavenet.h" // [Fork] for the parametric fast-path tests
 
   #include "allocation_tracking.h"
 
@@ -172,6 +173,59 @@ void compare(const std::vector<NAM_SAMPLE>& a, const std::vector<NAM_SAMPLE>& b,
   }
 }
 
+// [Fork] BEGIN: parametric fast-path numerical verification helpers
+// Build a compact ParametricWaveNet config (config["layers"] is an int, not an array).
+nlohmann::json build_parametric_a2_config(int channels, int num_params)
+{
+  nlohmann::json cfg;
+  cfg["layers"] = channels;
+  cfg["head_scale"] = 0.01f;
+  cfg["parametric"]["condition_size"] = num_params;
+  nlohmann::json params = nlohmann::json::array();
+  for (int i = 0; i < num_params; i++)
+    params.push_back({{"name", "knob" + std::to_string(i)}, {"minimum", 0.0f}, {"maximum", 1.0f}, {"default", 0.5f}});
+  cfg["parametric"]["parameters"] = params;
+  return cfg;
+}
+
+// Weight count for the ParametricWaveNet A2 layer array: same as a2_weight_count() plus
+// a per-layer FiLM net (num_params -> 2*channels, with bias), per the weight layout
+// documented in parametric_wavenet.h. Verified to reproduce the known-correct 2147
+// (channels=3, num_params=1) constant used elsewhere in the test suite.
+int parametric_a2_weight_count(int channels, int num_params)
+{
+  int total = a2_weight_count(channels);
+  // a2_weight_count already counts rechannel + per-layer conv/mixin/l1x1 + head + head_scale;
+  // add the per-layer FiLM net (weight + bias) on top.
+  total += nam::wavenet::a2_fast::kNumLayers * (2 * channels * num_params + 2 * channels);
+  return total;
+}
+
+void compare_parametric(const std::vector<NAM_SAMPLE>& a, const std::vector<NAM_SAMPLE>& b, int channels,
+                         int block_size, double tol)
+{
+  assert(a.size() == b.size());
+  double max_diff = 0.0;
+  int max_i = 0;
+  for (size_t i = 0; i < a.size(); i++)
+  {
+    const double d = std::fabs(static_cast<double>(a[i]) - static_cast<double>(b[i]));
+    if (d > max_diff)
+    {
+      max_diff = d;
+      max_i = static_cast<int>(i);
+    }
+  }
+  if (!(max_diff < tol))
+  {
+    std::cerr << "ParametricA2FastModel<" << channels << "> diverges from generic ParametricWaveNet "
+              << "(block=" << block_size << "): max |diff| = " << max_diff << " at i=" << max_i
+              << " (generic=" << a[max_i] << ", fast=" << b[max_i] << ")" << std::endl;
+    assert(false);
+  }
+}
+// [Fork] END: parametric fast-path numerical verification helpers
+
 } // namespace
 
 void test_detector_matches_nano()
@@ -303,6 +357,60 @@ void test_matches_generic_standard()
 {
   test_matches_generic(8);
 }
+
+// [Fork] BEGIN: parametric fast-path numerical verification (mirrors
+// test_matches_generic above, but for ParametricA2FastModel vs. the generic
+// ParametricWaveNet reference exposed via create_parametric_config_generic()).
+void test_parametric_matches_generic(int channels, int num_params)
+{
+  const auto cfg = build_parametric_a2_config(channels, num_params);
+  const int weight_count = parametric_a2_weight_count(channels, num_params);
+  const auto weights = make_deterministic_weights(weight_count, /*seed=*/0xFA2FA50u + channels * 100 + num_params);
+
+  // Fast path: build through the explicit parametric A2 factory.
+  auto fast_cfg = nam::wavenet::a2_fast::create_parametric_a2_fast_config(cfg, 48000.0);
+  std::vector<float> w_fast = weights;
+  auto fast_dsp = fast_cfg->create(std::move(w_fast), 48000.0);
+
+  // Generic path: call create_parametric_config_generic() directly so the fast-path
+  // dispatch doesn't kick in. This gives the reference ParametricWaveNet for the same config.
+  auto generic_cfg = nam::wavenet::create_parametric_config_generic(cfg, 48000.0);
+  std::vector<float> w_gen = weights;
+  auto generic_dsp = generic_cfg->create(std::move(w_gen), 48000.0);
+
+  // Both models default every knob to 0.5 on construction; exercise a non-default knob
+  // setting too so FiLM conditioning is actually tested, not just its zero/default case.
+  std::vector<float> knobs(num_params);
+  for (int i = 0; i < num_params; i++)
+    knobs[i] = 0.2f + 0.6f * (static_cast<float>(i) / std::max(1, num_params));
+  fast_dsp->SetKnobValues(knobs);
+  generic_dsp->SetKnobValues(knobs);
+
+  const int total = 2048;
+  const auto input = make_test_input(total, 48000.0);
+  for (int block : {64, 256})
+  {
+    const auto out_generic = run_dsp(*generic_dsp, input, block);
+    const auto out_fast = run_dsp(*fast_dsp, input, block);
+    compare_parametric(out_generic, out_fast, channels, block, /*tol=*/5e-5);
+  }
+}
+
+void test_parametric_matches_generic_nano()
+{
+  test_parametric_matches_generic(3, 1);
+}
+
+void test_parametric_matches_generic_medium()
+{
+  test_parametric_matches_generic(4, 1);
+}
+
+void test_parametric_matches_generic_standard()
+{
+  test_parametric_matches_generic(8, 2);
+}
+// [Fork] END: parametric fast-path numerical verification
 
 // Real-time safety: once the DSP has been Reset (buffers sized, prewarmed),
 // subsequent process() calls must not allocate or free heap memory. Uses the

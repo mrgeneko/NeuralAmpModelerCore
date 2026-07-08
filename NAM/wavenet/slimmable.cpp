@@ -509,6 +509,7 @@ void SlimmableWavenet::SetSlimmableSize(const double val)
   _stage_rebuild_model(target);
 }
 
+// [Fork] BEGIN: GetAllowedSizes()
 std::vector<int> SlimmableWavenet::GetAllowedSizes() const
 {
   // Real models only ever populate one slimmable layer array in practice; return
@@ -520,6 +521,7 @@ std::vector<int> SlimmableWavenet::GetAllowedSizes() const
   }
   return {};
 }
+// [Fork] END: GetAllowedSizes()
 
 // ============================================================================
 // Config / factory / registration

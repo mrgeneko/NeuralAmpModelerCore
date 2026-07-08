@@ -350,6 +350,9 @@ int main()
   test_a2_fast::test_matches_generic_nano();
   test_a2_fast::test_matches_generic_medium();
   test_a2_fast::test_matches_generic_standard();
+  test_a2_fast::test_parametric_matches_generic_nano();
+  test_a2_fast::test_parametric_matches_generic_medium();
+  test_a2_fast::test_parametric_matches_generic_standard();
   test_a2_fast::test_process_realtime_safe_nano();
   test_a2_fast::test_process_realtime_safe_medium();
   test_a2_fast::test_process_realtime_safe_standard();
