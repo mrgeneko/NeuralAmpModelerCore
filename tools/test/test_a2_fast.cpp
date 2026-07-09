@@ -255,10 +255,10 @@ void test_detector_accepts_nonstandard_head_scale()
 
 void test_detector_rejects_wrong_channels()
 {
-  // 5 is outside the supported fast-path set {3, 4, 8}.
+  // 9 is outside the supported fast-path set {3, 4, 5, 6, 7, 8}.
   auto cfg = build_a2_config(3);
-  cfg["layers"][0]["channels"] = 5;
-  cfg["layers"][0]["bottleneck"] = 5;
+  cfg["layers"][0]["channels"] = 9;
+  cfg["layers"][0]["bottleneck"] = 9;
   assert(!nam::wavenet::a2_fast::is_a2_shape(cfg, nullptr));
 }
 
@@ -270,9 +270,35 @@ void test_detector_matches_medium()
   assert(ch == 4);
 }
 
+// [Fork] BEGIN: widths 5, 6, 7
+void test_detector_matches_width5()
+{
+  auto cfg = build_a2_config(5);
+  int ch = 0;
+  assert(nam::wavenet::a2_fast::is_a2_shape(cfg, &ch));
+  assert(ch == 5);
+}
+
+void test_detector_matches_width6()
+{
+  auto cfg = build_a2_config(6);
+  int ch = 0;
+  assert(nam::wavenet::a2_fast::is_a2_shape(cfg, &ch));
+  assert(ch == 6);
+}
+
+void test_detector_matches_width7()
+{
+  auto cfg = build_a2_config(7);
+  int ch = 0;
+  assert(nam::wavenet::a2_fast::is_a2_shape(cfg, &ch));
+  assert(ch == 7);
+}
+// [Fork] END: widths 5, 6, 7
+
 void test_parametric_detector_matches_supported_widths()
 {
-  for (int channels : {3, 4, 8})
+  for (int channels : {3, 4, 5, 6, 7, 8})
   {
     nlohmann::json cfg;
     cfg["layers"] = channels;
@@ -284,9 +310,9 @@ void test_parametric_detector_matches_supported_widths()
     assert(np == 1);
   }
 
-  // 5 is outside the supported fast-path set {3, 4, 8}.
+  // 9 is outside the supported fast-path set {3, 4, 5, 6, 7, 8}.
   nlohmann::json cfg;
-  cfg["layers"] = 5;
+  cfg["layers"] = 9;
   cfg["head_scale"] = 1.0f;
   cfg["parametric"]["condition_size"] = 1;
   assert(!nam::wavenet::a2_fast::is_parametric_a2_shape(cfg, nullptr, nullptr));
@@ -353,6 +379,23 @@ void test_matches_generic_medium()
   test_matches_generic(4);
 }
 
+// [Fork] BEGIN: widths 5, 6, 7
+void test_matches_generic_width5()
+{
+  test_matches_generic(5);
+}
+
+void test_matches_generic_width6()
+{
+  test_matches_generic(6);
+}
+
+void test_matches_generic_width7()
+{
+  test_matches_generic(7);
+}
+// [Fork] END: widths 5, 6, 7
+
 void test_matches_generic_standard()
 {
   test_matches_generic(8);
@@ -405,6 +448,23 @@ void test_parametric_matches_generic_medium()
 {
   test_parametric_matches_generic(4, 1);
 }
+
+// [Fork] BEGIN: widths 5, 6, 7
+void test_parametric_matches_generic_width5()
+{
+  test_parametric_matches_generic(5, 1);
+}
+
+void test_parametric_matches_generic_width6()
+{
+  test_parametric_matches_generic(6, 1);
+}
+
+void test_parametric_matches_generic_width7()
+{
+  test_parametric_matches_generic(7, 1);
+}
+// [Fork] END: widths 5, 6, 7
 
 void test_parametric_matches_generic_standard()
 {
@@ -476,6 +536,23 @@ void test_process_realtime_safe_medium()
 {
   test_process_realtime_safe(4);
 }
+
+// [Fork] BEGIN: widths 5, 6, 7
+void test_process_realtime_safe_width5()
+{
+  test_process_realtime_safe(5);
+}
+
+void test_process_realtime_safe_width6()
+{
+  test_process_realtime_safe(6);
+}
+
+void test_process_realtime_safe_width7()
+{
+  test_process_realtime_safe(7);
+}
+// [Fork] END: widths 5, 6, 7
 
 void test_process_realtime_safe_standard()
 {

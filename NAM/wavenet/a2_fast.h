@@ -3,12 +3,12 @@
 // Specialized WaveNet fast path for the A2 standard (Channels=8) and
 // A2 nano (Channels=3) models. Shares the same architecture shape; only
 // the channel count differs.
-// [Fork] BEGIN: widened to also cover an intermediate Channels=4
-// width. Channels==3 and Channels==4 both use hand-unrolled small-GEMV
-// kernels (Eigen's GEMM path carries too much overhead at these small
-// inner dimensions); Channels==8 uses a generic Eigen fixed-size-matrix
-// path (see a2_fast.cpp). Every "3 or 8" reference below was widened to
-// "3, 4, or 8" accordingly.
+// [Fork] BEGIN: widened to also cover intermediate Channels=4..7
+// widths. Channels 3-7 all use hand-unrolled small-GEMV kernels (Eigen's
+// GEMM path carries too much overhead at these small inner dimensions);
+// Channels==8 uses a generic Eigen fixed-size-matrix path (see
+// a2_fast.cpp). Every "3 or 8" reference below was widened to
+// "3, 4, 5, 6, 7, or 8" accordingly.
 // [Fork] END
 //
 // When NAM_ENABLE_A2_FAST is defined at build time, wavenet::create_config
@@ -52,7 +52,7 @@ inline constexpr std::array<int, kNumLayers> kDilations = {
 /// \brief Strict detector: returns true iff config matches the A2 shape.
 /// \param config   The "config" sub-object from a .nam WaveNet entry.
 /// \param channels Out-param set to 3 (A2 nano) or 8 (A2 standard) on match.
-///                 [Fork] also matches/returns 4 (intermediate width).
+///                 [Fork] also matches/returns 4, 5, 6, 7 (intermediate widths).
 /// \return true if every architectural knob matches the A2 signature exactly.
 bool is_a2_shape(const nlohmann::json& config, int* channels);
 
@@ -68,9 +68,9 @@ std::unique_ptr<ModelConfig> create_a2_fast_config(const nlohmann::json& config,
 ///
 /// Unlike is_a2_shape, this accepts the compact ParametricWaveNet JSON format where
 /// config["layers"] is an integer (channel count), not an array. Checks that channels
-/// are 3, 4, or 8 and that a valid "parametric" block is present.
+/// are in {3, 4, 5, 6, 7, 8} and that a valid "parametric" block is present.
 /// \param config      The "config" sub-object from a ParametricWaveNet model entry.
-/// \param channels    Out-param set to 3, 4, or 8 on match.
+/// \param channels    Out-param set to 3-8 on match.
 /// \param num_params  Out-param set to condition_size on match.
 /// \return true if the config can be dispatched to the parametric A2 fast path.
 bool is_parametric_a2_shape(const nlohmann::json& config, int* channels, int* num_params);

@@ -340,6 +340,9 @@ int main()
   // A2 fast-path WaveNet: detector coverage + numerical match against generic.
   test_a2_fast::test_detector_matches_nano();
   test_a2_fast::test_detector_matches_medium();
+  test_a2_fast::test_detector_matches_width5();
+  test_a2_fast::test_detector_matches_width6();
+  test_a2_fast::test_detector_matches_width7();
   test_a2_fast::test_detector_matches_standard();
   test_a2_fast::test_parametric_detector_matches_supported_widths();
   test_a2_fast::test_detector_accepts_nonstandard_head_scale();
@@ -349,12 +352,21 @@ int main()
   test_a2_fast::test_detector_rejects_gating();
   test_a2_fast::test_matches_generic_nano();
   test_a2_fast::test_matches_generic_medium();
+  test_a2_fast::test_matches_generic_width5();
+  test_a2_fast::test_matches_generic_width6();
+  test_a2_fast::test_matches_generic_width7();
   test_a2_fast::test_matches_generic_standard();
   test_a2_fast::test_parametric_matches_generic_nano();
   test_a2_fast::test_parametric_matches_generic_medium();
+  test_a2_fast::test_parametric_matches_generic_width5();
+  test_a2_fast::test_parametric_matches_generic_width6();
+  test_a2_fast::test_parametric_matches_generic_width7();
   test_a2_fast::test_parametric_matches_generic_standard();
   test_a2_fast::test_process_realtime_safe_nano();
   test_a2_fast::test_process_realtime_safe_medium();
+  test_a2_fast::test_process_realtime_safe_width5();
+  test_a2_fast::test_process_realtime_safe_width6();
+  test_a2_fast::test_process_realtime_safe_width7();
   test_a2_fast::test_process_realtime_safe_standard();
 #endif
 
