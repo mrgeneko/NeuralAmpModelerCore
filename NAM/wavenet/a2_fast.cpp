@@ -135,9 +135,13 @@ private:
   #endif
 
   // Working buffers (all Channels rows, max_buffer_size cols, col-major).
-  std::vector<float> _layer_in; // current layer input / next layer input (in-place residual)
-  std::vector<float> _head_sum; // accumulates activations across all layers
-  std::vector<float> _z; // per-layer conv output accumulator (tap-major)
+  // Eigen::aligned_allocator guarantees 16-byte alignment so the Eigen::Map<..., Eigen::Aligned16>
+  // views constructed over these in the Channels==8 path (below) can use Eigen's fast aligned
+  // SIMD path instead of falling back to its unaligned-safe (and much slower) path. Plain
+  // std::vector<float> has no such guarantee -- see docs/Architecture/NAM_PERFORMANCE_INVESTIGATION.md.
+  std::vector<float, Eigen::aligned_allocator<float>> _layer_in; // current layer input / next layer input (in-place residual)
+  std::vector<float, Eigen::aligned_allocator<float>> _head_sum; // accumulates activations across all layers
+  std::vector<float, Eigen::aligned_allocator<float>> _z; // per-layer conv output accumulator (tap-major)
   std::vector<float> _cond; // float32 copy of the double NAM_SAMPLE input, reused each block
   std::vector<float> _head_out; // float32 head output before writing to NAM_SAMPLE
 
@@ -1352,6 +1356,328 @@ void A2FastModel<Channels>::_layer_forward_k(Layer& L, const float* cond, int nu
   }
   // [Fork] END: hand-unrolled Channels==7 kernel
 
+  else if constexpr (Channels == 8)
+  {
+    float* z = _z.data();
+
+    // Tap 0: seed z with conv_b (saves the memset-to-zero pass) and fold in
+    // the first tap's FMAs.
+    {
+      const float* wk = &L.conv_w[0];
+      const int tap_base = tap_base_phys(K - 1);
+      const float w0 = wk[0], w1 = wk[1], w2 = wk[2], w3 = wk[3], w4 = wk[4], w5 = wk[5], w6 = wk[6], w7 = wk[7];
+      const float w8 = wk[8], w9 = wk[9], w10 = wk[10], w11 = wk[11], w12 = wk[12], w13 = wk[13], w14 = wk[14], w15 = wk[15];
+      const float w16 = wk[16], w17 = wk[17], w18 = wk[18], w19 = wk[19], w20 = wk[20], w21 = wk[21], w22 = wk[22], w23 = wk[23];
+      const float w24 = wk[24], w25 = wk[25], w26 = wk[26], w27 = wk[27], w28 = wk[28], w29 = wk[29], w30 = wk[30], w31 = wk[31];
+      const float w32 = wk[32], w33 = wk[33], w34 = wk[34], w35 = wk[35], w36 = wk[36], w37 = wk[37], w38 = wk[38], w39 = wk[39];
+      const float w40 = wk[40], w41 = wk[41], w42 = wk[42], w43 = wk[43], w44 = wk[44], w45 = wk[45], w46 = wk[46], w47 = wk[47];
+      const float w48 = wk[48], w49 = wk[49], w50 = wk[50], w51 = wk[51], w52 = wk[52], w53 = wk[53], w54 = wk[54], w55 = wk[55];
+      const float w56 = wk[56], w57 = wk[57], w58 = wk[58], w59 = wk[59], w60 = wk[60], w61 = wk[61], w62 = wk[62], w63 = wk[63];
+      const float cb0 = L.conv_b[0], cb1 = L.conv_b[1], cb2 = L.conv_b[2], cb3 = L.conv_b[3], cb4 = L.conv_b[4], cb5 = L.conv_b[5], cb6 = L.conv_b[6], cb7 = L.conv_b[7];
+      for (int f = 0; f < num_frames; f++)
+      {
+        const float* src = &L.history[static_cast<size_t>(tap_base + f) * 8];
+        float a0 = cb0 + w0 * src[0];
+        float a1 = cb1 + w1 * src[0];
+        float a2 = cb2 + w2 * src[0];
+        float a3 = cb3 + w3 * src[0];
+        float a4 = cb4 + w4 * src[0];
+        float a5 = cb5 + w5 * src[0];
+        float a6 = cb6 + w6 * src[0];
+        float a7 = cb7 + w7 * src[0];
+        a0 += w8 * src[1];
+        a1 += w9 * src[1];
+        a2 += w10 * src[1];
+        a3 += w11 * src[1];
+        a4 += w12 * src[1];
+        a5 += w13 * src[1];
+        a6 += w14 * src[1];
+        a7 += w15 * src[1];
+        a0 += w16 * src[2];
+        a1 += w17 * src[2];
+        a2 += w18 * src[2];
+        a3 += w19 * src[2];
+        a4 += w20 * src[2];
+        a5 += w21 * src[2];
+        a6 += w22 * src[2];
+        a7 += w23 * src[2];
+        a0 += w24 * src[3];
+        a1 += w25 * src[3];
+        a2 += w26 * src[3];
+        a3 += w27 * src[3];
+        a4 += w28 * src[3];
+        a5 += w29 * src[3];
+        a6 += w30 * src[3];
+        a7 += w31 * src[3];
+        a0 += w32 * src[4];
+        a1 += w33 * src[4];
+        a2 += w34 * src[4];
+        a3 += w35 * src[4];
+        a4 += w36 * src[4];
+        a5 += w37 * src[4];
+        a6 += w38 * src[4];
+        a7 += w39 * src[4];
+        a0 += w40 * src[5];
+        a1 += w41 * src[5];
+        a2 += w42 * src[5];
+        a3 += w43 * src[5];
+        a4 += w44 * src[5];
+        a5 += w45 * src[5];
+        a6 += w46 * src[5];
+        a7 += w47 * src[5];
+        a0 += w48 * src[6];
+        a1 += w49 * src[6];
+        a2 += w50 * src[6];
+        a3 += w51 * src[6];
+        a4 += w52 * src[6];
+        a5 += w53 * src[6];
+        a6 += w54 * src[6];
+        a7 += w55 * src[6];
+        a0 += w56 * src[7];
+        a1 += w57 * src[7];
+        a2 += w58 * src[7];
+        a3 += w59 * src[7];
+        a4 += w60 * src[7];
+        a5 += w61 * src[7];
+        a6 += w62 * src[7];
+        a7 += w63 * src[7];
+        float* zf = z + static_cast<size_t>(f) * 8;
+        zf[0] = a0;
+        zf[1] = a1;
+        zf[2] = a2;
+        zf[3] = a3;
+        zf[4] = a4;
+        zf[5] = a5;
+        zf[6] = a6;
+        zf[7] = a7;
+      }
+    }
+
+    // Taps 1..K-2: accumulate into z with the same unrolled inner kernel.
+    for (int k = 1; k < K - 1; k++)
+    {
+      const float* wk = &L.conv_w[static_cast<size_t>(k) * 64];
+      const int tap_base = tap_base_phys(K - 1 - k);
+      const float w0 = wk[0], w1 = wk[1], w2 = wk[2], w3 = wk[3], w4 = wk[4], w5 = wk[5], w6 = wk[6], w7 = wk[7];
+      const float w8 = wk[8], w9 = wk[9], w10 = wk[10], w11 = wk[11], w12 = wk[12], w13 = wk[13], w14 = wk[14], w15 = wk[15];
+      const float w16 = wk[16], w17 = wk[17], w18 = wk[18], w19 = wk[19], w20 = wk[20], w21 = wk[21], w22 = wk[22], w23 = wk[23];
+      const float w24 = wk[24], w25 = wk[25], w26 = wk[26], w27 = wk[27], w28 = wk[28], w29 = wk[29], w30 = wk[30], w31 = wk[31];
+      const float w32 = wk[32], w33 = wk[33], w34 = wk[34], w35 = wk[35], w36 = wk[36], w37 = wk[37], w38 = wk[38], w39 = wk[39];
+      const float w40 = wk[40], w41 = wk[41], w42 = wk[42], w43 = wk[43], w44 = wk[44], w45 = wk[45], w46 = wk[46], w47 = wk[47];
+      const float w48 = wk[48], w49 = wk[49], w50 = wk[50], w51 = wk[51], w52 = wk[52], w53 = wk[53], w54 = wk[54], w55 = wk[55];
+      const float w56 = wk[56], w57 = wk[57], w58 = wk[58], w59 = wk[59], w60 = wk[60], w61 = wk[61], w62 = wk[62], w63 = wk[63];
+      for (int f = 0; f < num_frames; f++)
+      {
+        const float* src = &L.history[static_cast<size_t>(tap_base + f) * 8];
+        float* zf = z + static_cast<size_t>(f) * 8;
+        float a0 = zf[0] + w0 * src[0];
+        float a1 = zf[1] + w1 * src[0];
+        float a2 = zf[2] + w2 * src[0];
+        float a3 = zf[3] + w3 * src[0];
+        float a4 = zf[4] + w4 * src[0];
+        float a5 = zf[5] + w5 * src[0];
+        float a6 = zf[6] + w6 * src[0];
+        float a7 = zf[7] + w7 * src[0];
+        a0 += w8 * src[1];
+        a1 += w9 * src[1];
+        a2 += w10 * src[1];
+        a3 += w11 * src[1];
+        a4 += w12 * src[1];
+        a5 += w13 * src[1];
+        a6 += w14 * src[1];
+        a7 += w15 * src[1];
+        a0 += w16 * src[2];
+        a1 += w17 * src[2];
+        a2 += w18 * src[2];
+        a3 += w19 * src[2];
+        a4 += w20 * src[2];
+        a5 += w21 * src[2];
+        a6 += w22 * src[2];
+        a7 += w23 * src[2];
+        a0 += w24 * src[3];
+        a1 += w25 * src[3];
+        a2 += w26 * src[3];
+        a3 += w27 * src[3];
+        a4 += w28 * src[3];
+        a5 += w29 * src[3];
+        a6 += w30 * src[3];
+        a7 += w31 * src[3];
+        a0 += w32 * src[4];
+        a1 += w33 * src[4];
+        a2 += w34 * src[4];
+        a3 += w35 * src[4];
+        a4 += w36 * src[4];
+        a5 += w37 * src[4];
+        a6 += w38 * src[4];
+        a7 += w39 * src[4];
+        a0 += w40 * src[5];
+        a1 += w41 * src[5];
+        a2 += w42 * src[5];
+        a3 += w43 * src[5];
+        a4 += w44 * src[5];
+        a5 += w45 * src[5];
+        a6 += w46 * src[5];
+        a7 += w47 * src[5];
+        a0 += w48 * src[6];
+        a1 += w49 * src[6];
+        a2 += w50 * src[6];
+        a3 += w51 * src[6];
+        a4 += w52 * src[6];
+        a5 += w53 * src[6];
+        a6 += w54 * src[6];
+        a7 += w55 * src[6];
+        a0 += w56 * src[7];
+        a1 += w57 * src[7];
+        a2 += w58 * src[7];
+        a3 += w59 * src[7];
+        a4 += w60 * src[7];
+        a5 += w61 * src[7];
+        a6 += w62 * src[7];
+        a7 += w63 * src[7];
+        zf[0] = a0;
+        zf[1] = a1;
+        zf[2] = a2;
+        zf[3] = a3;
+        zf[4] = a4;
+        zf[5] = a5;
+        zf[6] = a6;
+        zf[7] = a7;
+      }
+    }
+
+    // Final tap (K-1, offset 0) fully inlined with the post-conv tail.
+    const float* wk_last = &L.conv_w[static_cast<size_t>(K - 1) * 64];
+    const int tap_base_last = tap_base_phys(0);
+    const float cw0 = wk_last[0], cw1 = wk_last[1], cw2 = wk_last[2], cw3 = wk_last[3], cw4 = wk_last[4], cw5 = wk_last[5], cw6 = wk_last[6], cw7 = wk_last[7];
+    const float cw8 = wk_last[8], cw9 = wk_last[9], cw10 = wk_last[10], cw11 = wk_last[11], cw12 = wk_last[12], cw13 = wk_last[13], cw14 = wk_last[14], cw15 = wk_last[15];
+    const float cw16 = wk_last[16], cw17 = wk_last[17], cw18 = wk_last[18], cw19 = wk_last[19], cw20 = wk_last[20], cw21 = wk_last[21], cw22 = wk_last[22], cw23 = wk_last[23];
+    const float cw24 = wk_last[24], cw25 = wk_last[25], cw26 = wk_last[26], cw27 = wk_last[27], cw28 = wk_last[28], cw29 = wk_last[29], cw30 = wk_last[30], cw31 = wk_last[31];
+    const float cw32 = wk_last[32], cw33 = wk_last[33], cw34 = wk_last[34], cw35 = wk_last[35], cw36 = wk_last[36], cw37 = wk_last[37], cw38 = wk_last[38], cw39 = wk_last[39];
+    const float cw40 = wk_last[40], cw41 = wk_last[41], cw42 = wk_last[42], cw43 = wk_last[43], cw44 = wk_last[44], cw45 = wk_last[45], cw46 = wk_last[46], cw47 = wk_last[47];
+    const float cw48 = wk_last[48], cw49 = wk_last[49], cw50 = wk_last[50], cw51 = wk_last[51], cw52 = wk_last[52], cw53 = wk_last[53], cw54 = wk_last[54], cw55 = wk_last[55];
+    const float cw56 = wk_last[56], cw57 = wk_last[57], cw58 = wk_last[58], cw59 = wk_last[59], cw60 = wk_last[60], cw61 = wk_last[61], cw62 = wk_last[62], cw63 = wk_last[63];
+    const float mw0 = L.mixin_w[0], mw1 = L.mixin_w[1], mw2 = L.mixin_w[2], mw3 = L.mixin_w[3], mw4 = L.mixin_w[4], mw5 = L.mixin_w[5], mw6 = L.mixin_w[6], mw7 = L.mixin_w[7];
+    // layer1x1 col-major: lw[b*8 + c] is weight from bottleneck b to output c.
+    const float lw00 = L.l1x1_w[0], lw01 = L.l1x1_w[1], lw02 = L.l1x1_w[2], lw03 = L.l1x1_w[3], lw04 = L.l1x1_w[4], lw05 = L.l1x1_w[5], lw06 = L.l1x1_w[6], lw07 = L.l1x1_w[7];
+    const float lw10 = L.l1x1_w[8], lw11 = L.l1x1_w[9], lw12 = L.l1x1_w[10], lw13 = L.l1x1_w[11], lw14 = L.l1x1_w[12], lw15 = L.l1x1_w[13], lw16 = L.l1x1_w[14], lw17 = L.l1x1_w[15];
+    const float lw20 = L.l1x1_w[16], lw21 = L.l1x1_w[17], lw22 = L.l1x1_w[18], lw23 = L.l1x1_w[19], lw24 = L.l1x1_w[20], lw25 = L.l1x1_w[21], lw26 = L.l1x1_w[22], lw27 = L.l1x1_w[23];
+    const float lw30 = L.l1x1_w[24], lw31 = L.l1x1_w[25], lw32 = L.l1x1_w[26], lw33 = L.l1x1_w[27], lw34 = L.l1x1_w[28], lw35 = L.l1x1_w[29], lw36 = L.l1x1_w[30], lw37 = L.l1x1_w[31];
+    const float lw40 = L.l1x1_w[32], lw41 = L.l1x1_w[33], lw42 = L.l1x1_w[34], lw43 = L.l1x1_w[35], lw44 = L.l1x1_w[36], lw45 = L.l1x1_w[37], lw46 = L.l1x1_w[38], lw47 = L.l1x1_w[39];
+    const float lw50 = L.l1x1_w[40], lw51 = L.l1x1_w[41], lw52 = L.l1x1_w[42], lw53 = L.l1x1_w[43], lw54 = L.l1x1_w[44], lw55 = L.l1x1_w[45], lw56 = L.l1x1_w[46], lw57 = L.l1x1_w[47];
+    const float lw60 = L.l1x1_w[48], lw61 = L.l1x1_w[49], lw62 = L.l1x1_w[50], lw63 = L.l1x1_w[51], lw64 = L.l1x1_w[52], lw65 = L.l1x1_w[53], lw66 = L.l1x1_w[54], lw67 = L.l1x1_w[55];
+    const float lw70 = L.l1x1_w[56], lw71 = L.l1x1_w[57], lw72 = L.l1x1_w[58], lw73 = L.l1x1_w[59], lw74 = L.l1x1_w[60], lw75 = L.l1x1_w[61], lw76 = L.l1x1_w[62], lw77 = L.l1x1_w[63];
+    const float lb0 = L.l1x1_b[0], lb1 = L.l1x1_b[1], lb2 = L.l1x1_b[2], lb3 = L.l1x1_b[3], lb4 = L.l1x1_b[4], lb5 = L.l1x1_b[5], lb6 = L.l1x1_b[6], lb7 = L.l1x1_b[7];
+    for (int f = 0; f < num_frames; f++)
+    {
+      const float* src = &L.history[static_cast<size_t>(tap_base_last + f) * 8];
+      const float* zf_mem = z + static_cast<size_t>(f) * 8;
+      // Final tap GEMV.
+      float a0 = zf_mem[0] + cw0 * src[0];
+      float a1 = zf_mem[1] + cw1 * src[0];
+      float a2 = zf_mem[2] + cw2 * src[0];
+      float a3 = zf_mem[3] + cw3 * src[0];
+      float a4 = zf_mem[4] + cw4 * src[0];
+      float a5 = zf_mem[5] + cw5 * src[0];
+      float a6 = zf_mem[6] + cw6 * src[0];
+      float a7 = zf_mem[7] + cw7 * src[0];
+      a0 += cw8 * src[1];
+      a1 += cw9 * src[1];
+      a2 += cw10 * src[1];
+      a3 += cw11 * src[1];
+      a4 += cw12 * src[1];
+      a5 += cw13 * src[1];
+      a6 += cw14 * src[1];
+      a7 += cw15 * src[1];
+      a0 += cw16 * src[2];
+      a1 += cw17 * src[2];
+      a2 += cw18 * src[2];
+      a3 += cw19 * src[2];
+      a4 += cw20 * src[2];
+      a5 += cw21 * src[2];
+      a6 += cw22 * src[2];
+      a7 += cw23 * src[2];
+      a0 += cw24 * src[3];
+      a1 += cw25 * src[3];
+      a2 += cw26 * src[3];
+      a3 += cw27 * src[3];
+      a4 += cw28 * src[3];
+      a5 += cw29 * src[3];
+      a6 += cw30 * src[3];
+      a7 += cw31 * src[3];
+      a0 += cw32 * src[4];
+      a1 += cw33 * src[4];
+      a2 += cw34 * src[4];
+      a3 += cw35 * src[4];
+      a4 += cw36 * src[4];
+      a5 += cw37 * src[4];
+      a6 += cw38 * src[4];
+      a7 += cw39 * src[4];
+      a0 += cw40 * src[5];
+      a1 += cw41 * src[5];
+      a2 += cw42 * src[5];
+      a3 += cw43 * src[5];
+      a4 += cw44 * src[5];
+      a5 += cw45 * src[5];
+      a6 += cw46 * src[5];
+      a7 += cw47 * src[5];
+      a0 += cw48 * src[6];
+      a1 += cw49 * src[6];
+      a2 += cw50 * src[6];
+      a3 += cw51 * src[6];
+      a4 += cw52 * src[6];
+      a5 += cw53 * src[6];
+      a6 += cw54 * src[6];
+      a7 += cw55 * src[6];
+      a0 += cw56 * src[7];
+      a1 += cw57 * src[7];
+      a2 += cw58 * src[7];
+      a3 += cw59 * src[7];
+      a4 += cw60 * src[7];
+      a5 += cw61 * src[7];
+      a6 += cw62 * src[7];
+      a7 += cw63 * src[7];
+      // Mixin + LeakyReLU.
+      const float cf = cond[f];
+      a0 += mw0 * cf;
+      a1 += mw1 * cf;
+      a2 += mw2 * cf;
+      a3 += mw3 * cf;
+      a4 += mw4 * cf;
+      a5 += mw5 * cf;
+      a6 += mw6 * cf;
+      a7 += mw7 * cf;
+      a0 = (a0 >= 0.0f) ? a0 : a0 * kLeakySlope;
+      a1 = (a1 >= 0.0f) ? a1 : a1 * kLeakySlope;
+      a2 = (a2 >= 0.0f) ? a2 : a2 * kLeakySlope;
+      a3 = (a3 >= 0.0f) ? a3 : a3 * kLeakySlope;
+      a4 = (a4 >= 0.0f) ? a4 : a4 * kLeakySlope;
+      a5 = (a5 >= 0.0f) ? a5 : a5 * kLeakySlope;
+      a6 = (a6 >= 0.0f) ? a6 : a6 * kLeakySlope;
+      a7 = (a7 >= 0.0f) ? a7 : a7 * kLeakySlope;
+      // Head sum accumulate.
+      float* hsum = &_head_sum[static_cast<size_t>(f) * 8];
+      hsum[0] += a0;
+      hsum[1] += a1;
+      hsum[2] += a2;
+      hsum[3] += a3;
+      hsum[4] += a4;
+      hsum[5] += a5;
+      hsum[6] += a6;
+      hsum[7] += a7;
+      // layer1x1 residual.
+      float* lin = &_layer_in[static_cast<size_t>(f) * 8];
+      lin[0] += lb0 + lw00 * a0 + lw10 * a1 + lw20 * a2 + lw30 * a3 + lw40 * a4 + lw50 * a5 + lw60 * a6 + lw70 * a7;
+      lin[1] += lb1 + lw01 * a0 + lw11 * a1 + lw21 * a2 + lw31 * a3 + lw41 * a4 + lw51 * a5 + lw61 * a6 + lw71 * a7;
+      lin[2] += lb2 + lw02 * a0 + lw12 * a1 + lw22 * a2 + lw32 * a3 + lw42 * a4 + lw52 * a5 + lw62 * a6 + lw72 * a7;
+      lin[3] += lb3 + lw03 * a0 + lw13 * a1 + lw23 * a2 + lw33 * a3 + lw43 * a4 + lw53 * a5 + lw63 * a6 + lw73 * a7;
+      lin[4] += lb4 + lw04 * a0 + lw14 * a1 + lw24 * a2 + lw34 * a3 + lw44 * a4 + lw54 * a5 + lw64 * a6 + lw74 * a7;
+      lin[5] += lb5 + lw05 * a0 + lw15 * a1 + lw25 * a2 + lw35 * a3 + lw45 * a4 + lw55 * a5 + lw65 * a6 + lw75 * a7;
+      lin[6] += lb6 + lw06 * a0 + lw16 * a1 + lw26 * a2 + lw36 * a3 + lw46 * a4 + lw56 * a5 + lw66 * a6 + lw76 * a7;
+      lin[7] += lb7 + lw07 * a0 + lw17 * a1 + lw27 * a2 + lw37 * a3 + lw47 * a4 + lw57 * a5 + lw67 * a6 + lw77 * a7;
+    }
+  }
+  // [Fork] END: hand-unrolled Channels==8 kernel
+
   else
   {
     // Use Eigen's tuned 8x8 × 8xN GEMM for the whole block at once. Unlike a
@@ -1378,9 +1704,12 @@ void A2FastModel<Channels>::_layer_forward_k(Layer& L, const float* cond, int nu
     Eigen::Map<const VecC> l1x1_b_vec(L.l1x1_b.data());
     Eigen::Map<const RowDyn> cond_row(cond, 1, num_frames);
 
-    Eigen::Map<MatCDyn> ztile(_z.data(), Channels, num_frames);
-    Eigen::Map<MatCDyn> hsum_block(_head_sum.data(), Channels, num_frames);
-    Eigen::Map<MatCDyn> lin_block(_layer_in.data(), Channels, num_frames);
+    // Aligned16: _z/_head_sum/_layer_in use Eigen::aligned_allocator (guaranteed 16-byte
+    // aligned), so it's safe to tell Eigen explicitly rather than let it assume Unaligned
+    // and take its conservative (much slower) SIMD path. See member declarations above.
+    Eigen::Map<MatCDyn, Eigen::Aligned16> ztile(_z.data(), Channels, num_frames);
+    Eigen::Map<MatCDyn, Eigen::Aligned16> hsum_block(_head_sum.data(), Channels, num_frames);
+    Eigen::Map<MatCDyn, Eigen::Aligned16> lin_block(_layer_in.data(), Channels, num_frames);
 
     ztile.setZero();
 
@@ -1672,8 +2001,10 @@ private:
   #endif
 
   // Working buffers (Channels × maxBufferSize, col-major).
-  std::vector<float> _layer_in; // layer input / residual accumulator
-  std::vector<float> _z;        // per-layer conv accumulator
+  // Eigen::aligned_allocator guarantees 16-byte alignment for the Eigen::Map<..., Eigen::Aligned16>
+  // views below -- see A2FastModel's identical comment above for why this matters.
+  std::vector<float, Eigen::aligned_allocator<float>> _layer_in; // layer input / residual accumulator
+  std::vector<float, Eigen::aligned_allocator<float>> _z;        // per-layer conv accumulator
   std::vector<float> _cond;     // float32 copy of input audio
   std::vector<float> _head_out; // float32 head output
 
@@ -2500,6 +2831,146 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
   }
   // [Fork] END: hand-unrolled Channels==7 kernel
 
+  else if constexpr (Channels == 8)
+  {
+    // Preload per-layer FiLM coefficients (constant across all frames in this buffer).
+    const float g0 = _film_gamma[li][0], g1 = _film_gamma[li][1], g2 = _film_gamma[li][2], g3 = _film_gamma[li][3], g4 = _film_gamma[li][4], g5 = _film_gamma[li][5], g6 = _film_gamma[li][6], g7 = _film_gamma[li][7];
+    const float bt0 = _film_beta[li][0], bt1 = _film_beta[li][1], bt2 = _film_beta[li][2], bt3 = _film_beta[li][3], bt4 = _film_beta[li][4], bt5 = _film_beta[li][5], bt6 = _film_beta[li][6], bt7 = _film_beta[li][7];
+
+    float* z = _z.data();
+
+    // Tap 0: seed z with conv_b.
+    {
+      const float* wk = &L.conv_w[0];
+      const int tap_base = tap_base_phys(K - 1);
+      const float w0 = wk[0], w1 = wk[1], w2 = wk[2], w3 = wk[3], w4 = wk[4], w5 = wk[5], w6 = wk[6], w7 = wk[7];
+      const float w8 = wk[8], w9 = wk[9], w10 = wk[10], w11 = wk[11], w12 = wk[12], w13 = wk[13], w14 = wk[14], w15 = wk[15];
+      const float w16 = wk[16], w17 = wk[17], w18 = wk[18], w19 = wk[19], w20 = wk[20], w21 = wk[21], w22 = wk[22], w23 = wk[23];
+      const float w24 = wk[24], w25 = wk[25], w26 = wk[26], w27 = wk[27], w28 = wk[28], w29 = wk[29], w30 = wk[30], w31 = wk[31];
+      const float w32 = wk[32], w33 = wk[33], w34 = wk[34], w35 = wk[35], w36 = wk[36], w37 = wk[37], w38 = wk[38], w39 = wk[39];
+      const float w40 = wk[40], w41 = wk[41], w42 = wk[42], w43 = wk[43], w44 = wk[44], w45 = wk[45], w46 = wk[46], w47 = wk[47];
+      const float w48 = wk[48], w49 = wk[49], w50 = wk[50], w51 = wk[51], w52 = wk[52], w53 = wk[53], w54 = wk[54], w55 = wk[55];
+      const float w56 = wk[56], w57 = wk[57], w58 = wk[58], w59 = wk[59], w60 = wk[60], w61 = wk[61], w62 = wk[62], w63 = wk[63];
+      const float cb0 = L.conv_b[0], cb1 = L.conv_b[1], cb2 = L.conv_b[2], cb3 = L.conv_b[3], cb4 = L.conv_b[4], cb5 = L.conv_b[5], cb6 = L.conv_b[6], cb7 = L.conv_b[7];
+      for (int f = 0; f < num_frames; f++)
+      {
+        const float* src = &L.history[static_cast<size_t>(tap_base + f) * 8];
+        float* zf = z + static_cast<size_t>(f) * 8;
+        zf[0] = cb0 + w0 * src[0] + w8 * src[1] + w16 * src[2] + w24 * src[3] + w32 * src[4] + w40 * src[5] + w48 * src[6] + w56 * src[7];
+        zf[1] = cb1 + w1 * src[0] + w9 * src[1] + w17 * src[2] + w25 * src[3] + w33 * src[4] + w41 * src[5] + w49 * src[6] + w57 * src[7];
+        zf[2] = cb2 + w2 * src[0] + w10 * src[1] + w18 * src[2] + w26 * src[3] + w34 * src[4] + w42 * src[5] + w50 * src[6] + w58 * src[7];
+        zf[3] = cb3 + w3 * src[0] + w11 * src[1] + w19 * src[2] + w27 * src[3] + w35 * src[4] + w43 * src[5] + w51 * src[6] + w59 * src[7];
+        zf[4] = cb4 + w4 * src[0] + w12 * src[1] + w20 * src[2] + w28 * src[3] + w36 * src[4] + w44 * src[5] + w52 * src[6] + w60 * src[7];
+        zf[5] = cb5 + w5 * src[0] + w13 * src[1] + w21 * src[2] + w29 * src[3] + w37 * src[4] + w45 * src[5] + w53 * src[6] + w61 * src[7];
+        zf[6] = cb6 + w6 * src[0] + w14 * src[1] + w22 * src[2] + w30 * src[3] + w38 * src[4] + w46 * src[5] + w54 * src[6] + w62 * src[7];
+        zf[7] = cb7 + w7 * src[0] + w15 * src[1] + w23 * src[2] + w31 * src[3] + w39 * src[4] + w47 * src[5] + w55 * src[6] + w63 * src[7];
+      }
+    }
+
+    // Taps 1..K-2: accumulate.
+    for (int k = 1; k < K - 1; k++)
+    {
+      const float* wk = &L.conv_w[static_cast<size_t>(k) * 64];
+      const int tap_base = tap_base_phys(K - 1 - k);
+      const float w0 = wk[0], w1 = wk[1], w2 = wk[2], w3 = wk[3], w4 = wk[4], w5 = wk[5], w6 = wk[6], w7 = wk[7];
+      const float w8 = wk[8], w9 = wk[9], w10 = wk[10], w11 = wk[11], w12 = wk[12], w13 = wk[13], w14 = wk[14], w15 = wk[15];
+      const float w16 = wk[16], w17 = wk[17], w18 = wk[18], w19 = wk[19], w20 = wk[20], w21 = wk[21], w22 = wk[22], w23 = wk[23];
+      const float w24 = wk[24], w25 = wk[25], w26 = wk[26], w27 = wk[27], w28 = wk[28], w29 = wk[29], w30 = wk[30], w31 = wk[31];
+      const float w32 = wk[32], w33 = wk[33], w34 = wk[34], w35 = wk[35], w36 = wk[36], w37 = wk[37], w38 = wk[38], w39 = wk[39];
+      const float w40 = wk[40], w41 = wk[41], w42 = wk[42], w43 = wk[43], w44 = wk[44], w45 = wk[45], w46 = wk[46], w47 = wk[47];
+      const float w48 = wk[48], w49 = wk[49], w50 = wk[50], w51 = wk[51], w52 = wk[52], w53 = wk[53], w54 = wk[54], w55 = wk[55];
+      const float w56 = wk[56], w57 = wk[57], w58 = wk[58], w59 = wk[59], w60 = wk[60], w61 = wk[61], w62 = wk[62], w63 = wk[63];
+      for (int f = 0; f < num_frames; f++)
+      {
+        const float* src = &L.history[static_cast<size_t>(tap_base + f) * 8];
+        float* zf = z + static_cast<size_t>(f) * 8;
+        zf[0] += w0 * src[0] + w8 * src[1] + w16 * src[2] + w24 * src[3] + w32 * src[4] + w40 * src[5] + w48 * src[6] + w56 * src[7];
+        zf[1] += w1 * src[0] + w9 * src[1] + w17 * src[2] + w25 * src[3] + w33 * src[4] + w41 * src[5] + w49 * src[6] + w57 * src[7];
+        zf[2] += w2 * src[0] + w10 * src[1] + w18 * src[2] + w26 * src[3] + w34 * src[4] + w42 * src[5] + w50 * src[6] + w58 * src[7];
+        zf[3] += w3 * src[0] + w11 * src[1] + w19 * src[2] + w27 * src[3] + w35 * src[4] + w43 * src[5] + w51 * src[6] + w59 * src[7];
+        zf[4] += w4 * src[0] + w12 * src[1] + w20 * src[2] + w28 * src[3] + w36 * src[4] + w44 * src[5] + w52 * src[6] + w60 * src[7];
+        zf[5] += w5 * src[0] + w13 * src[1] + w21 * src[2] + w29 * src[3] + w37 * src[4] + w45 * src[5] + w53 * src[6] + w61 * src[7];
+        zf[6] += w6 * src[0] + w14 * src[1] + w22 * src[2] + w30 * src[3] + w38 * src[4] + w46 * src[5] + w54 * src[6] + w62 * src[7];
+        zf[7] += w7 * src[0] + w15 * src[1] + w23 * src[2] + w31 * src[3] + w39 * src[4] + w47 * src[5] + w55 * src[6] + w63 * src[7];
+      }
+    }
+
+    // Final tap + mixin + FiLM + LeakyReLU + l1x1 residual (no head_sum accumulation).
+    const float* wk_last = &L.conv_w[static_cast<size_t>(K - 1) * 64];
+    const int tap_base_last = tap_base_phys(0);
+    const float cw0 = wk_last[0], cw1 = wk_last[1], cw2 = wk_last[2], cw3 = wk_last[3], cw4 = wk_last[4], cw5 = wk_last[5], cw6 = wk_last[6], cw7 = wk_last[7];
+    const float cw8 = wk_last[8], cw9 = wk_last[9], cw10 = wk_last[10], cw11 = wk_last[11], cw12 = wk_last[12], cw13 = wk_last[13], cw14 = wk_last[14], cw15 = wk_last[15];
+    const float cw16 = wk_last[16], cw17 = wk_last[17], cw18 = wk_last[18], cw19 = wk_last[19], cw20 = wk_last[20], cw21 = wk_last[21], cw22 = wk_last[22], cw23 = wk_last[23];
+    const float cw24 = wk_last[24], cw25 = wk_last[25], cw26 = wk_last[26], cw27 = wk_last[27], cw28 = wk_last[28], cw29 = wk_last[29], cw30 = wk_last[30], cw31 = wk_last[31];
+    const float cw32 = wk_last[32], cw33 = wk_last[33], cw34 = wk_last[34], cw35 = wk_last[35], cw36 = wk_last[36], cw37 = wk_last[37], cw38 = wk_last[38], cw39 = wk_last[39];
+    const float cw40 = wk_last[40], cw41 = wk_last[41], cw42 = wk_last[42], cw43 = wk_last[43], cw44 = wk_last[44], cw45 = wk_last[45], cw46 = wk_last[46], cw47 = wk_last[47];
+    const float cw48 = wk_last[48], cw49 = wk_last[49], cw50 = wk_last[50], cw51 = wk_last[51], cw52 = wk_last[52], cw53 = wk_last[53], cw54 = wk_last[54], cw55 = wk_last[55];
+    const float cw56 = wk_last[56], cw57 = wk_last[57], cw58 = wk_last[58], cw59 = wk_last[59], cw60 = wk_last[60], cw61 = wk_last[61], cw62 = wk_last[62], cw63 = wk_last[63];
+    const float mw0 = L.mixin_w[0], mw1 = L.mixin_w[1], mw2 = L.mixin_w[2], mw3 = L.mixin_w[3], mw4 = L.mixin_w[4], mw5 = L.mixin_w[5], mw6 = L.mixin_w[6], mw7 = L.mixin_w[7];
+    const float lw00 = L.l1x1_w[0], lw01 = L.l1x1_w[1], lw02 = L.l1x1_w[2], lw03 = L.l1x1_w[3], lw04 = L.l1x1_w[4], lw05 = L.l1x1_w[5], lw06 = L.l1x1_w[6], lw07 = L.l1x1_w[7];
+    const float lw10 = L.l1x1_w[8], lw11 = L.l1x1_w[9], lw12 = L.l1x1_w[10], lw13 = L.l1x1_w[11], lw14 = L.l1x1_w[12], lw15 = L.l1x1_w[13], lw16 = L.l1x1_w[14], lw17 = L.l1x1_w[15];
+    const float lw20 = L.l1x1_w[16], lw21 = L.l1x1_w[17], lw22 = L.l1x1_w[18], lw23 = L.l1x1_w[19], lw24 = L.l1x1_w[20], lw25 = L.l1x1_w[21], lw26 = L.l1x1_w[22], lw27 = L.l1x1_w[23];
+    const float lw30 = L.l1x1_w[24], lw31 = L.l1x1_w[25], lw32 = L.l1x1_w[26], lw33 = L.l1x1_w[27], lw34 = L.l1x1_w[28], lw35 = L.l1x1_w[29], lw36 = L.l1x1_w[30], lw37 = L.l1x1_w[31];
+    const float lw40 = L.l1x1_w[32], lw41 = L.l1x1_w[33], lw42 = L.l1x1_w[34], lw43 = L.l1x1_w[35], lw44 = L.l1x1_w[36], lw45 = L.l1x1_w[37], lw46 = L.l1x1_w[38], lw47 = L.l1x1_w[39];
+    const float lw50 = L.l1x1_w[40], lw51 = L.l1x1_w[41], lw52 = L.l1x1_w[42], lw53 = L.l1x1_w[43], lw54 = L.l1x1_w[44], lw55 = L.l1x1_w[45], lw56 = L.l1x1_w[46], lw57 = L.l1x1_w[47];
+    const float lw60 = L.l1x1_w[48], lw61 = L.l1x1_w[49], lw62 = L.l1x1_w[50], lw63 = L.l1x1_w[51], lw64 = L.l1x1_w[52], lw65 = L.l1x1_w[53], lw66 = L.l1x1_w[54], lw67 = L.l1x1_w[55];
+    const float lw70 = L.l1x1_w[56], lw71 = L.l1x1_w[57], lw72 = L.l1x1_w[58], lw73 = L.l1x1_w[59], lw74 = L.l1x1_w[60], lw75 = L.l1x1_w[61], lw76 = L.l1x1_w[62], lw77 = L.l1x1_w[63];
+    const float lb0 = L.l1x1_b[0], lb1 = L.l1x1_b[1], lb2 = L.l1x1_b[2], lb3 = L.l1x1_b[3], lb4 = L.l1x1_b[4], lb5 = L.l1x1_b[5], lb6 = L.l1x1_b[6], lb7 = L.l1x1_b[7];
+    for (int f = 0; f < num_frames; f++)
+    {
+      const float* src = &L.history[static_cast<size_t>(tap_base_last + f) * 8];
+      const float* zf = z + static_cast<size_t>(f) * 8;
+      // Final tap GEMV.
+      float a0 = zf[0] + cw0 * src[0] + cw8 * src[1] + cw16 * src[2] + cw24 * src[3] + cw32 * src[4] + cw40 * src[5] + cw48 * src[6] + cw56 * src[7];
+      float a1 = zf[1] + cw1 * src[0] + cw9 * src[1] + cw17 * src[2] + cw25 * src[3] + cw33 * src[4] + cw41 * src[5] + cw49 * src[6] + cw57 * src[7];
+      float a2 = zf[2] + cw2 * src[0] + cw10 * src[1] + cw18 * src[2] + cw26 * src[3] + cw34 * src[4] + cw42 * src[5] + cw50 * src[6] + cw58 * src[7];
+      float a3 = zf[3] + cw3 * src[0] + cw11 * src[1] + cw19 * src[2] + cw27 * src[3] + cw35 * src[4] + cw43 * src[5] + cw51 * src[6] + cw59 * src[7];
+      float a4 = zf[4] + cw4 * src[0] + cw12 * src[1] + cw20 * src[2] + cw28 * src[3] + cw36 * src[4] + cw44 * src[5] + cw52 * src[6] + cw60 * src[7];
+      float a5 = zf[5] + cw5 * src[0] + cw13 * src[1] + cw21 * src[2] + cw29 * src[3] + cw37 * src[4] + cw45 * src[5] + cw53 * src[6] + cw61 * src[7];
+      float a6 = zf[6] + cw6 * src[0] + cw14 * src[1] + cw22 * src[2] + cw30 * src[3] + cw38 * src[4] + cw46 * src[5] + cw54 * src[6] + cw62 * src[7];
+      float a7 = zf[7] + cw7 * src[0] + cw15 * src[1] + cw23 * src[2] + cw31 * src[3] + cw39 * src[4] + cw47 * src[5] + cw55 * src[6] + cw63 * src[7];
+      // Mixin.
+      const float cf = cond[f];
+      a0 += mw0 * cf;
+      a1 += mw1 * cf;
+      a2 += mw2 * cf;
+      a3 += mw3 * cf;
+      a4 += mw4 * cf;
+      a5 += mw5 * cf;
+      a6 += mw6 * cf;
+      a7 += mw7 * cf;
+      // FiLM: gamma * (conv+mixin) + beta.
+      a0 = g0 * a0 + bt0;
+      a1 = g1 * a1 + bt1;
+      a2 = g2 * a2 + bt2;
+      a3 = g3 * a3 + bt3;
+      a4 = g4 * a4 + bt4;
+      a5 = g5 * a5 + bt5;
+      a6 = g6 * a6 + bt6;
+      a7 = g7 * a7 + bt7;
+      // LeakyReLU.
+      a0 = (a0 >= 0.0f) ? a0 : a0 * kLeakySlope;
+      a1 = (a1 >= 0.0f) ? a1 : a1 * kLeakySlope;
+      a2 = (a2 >= 0.0f) ? a2 : a2 * kLeakySlope;
+      a3 = (a3 >= 0.0f) ? a3 : a3 * kLeakySlope;
+      a4 = (a4 >= 0.0f) ? a4 : a4 * kLeakySlope;
+      a5 = (a5 >= 0.0f) ? a5 : a5 * kLeakySlope;
+      a6 = (a6 >= 0.0f) ? a6 : a6 * kLeakySlope;
+      a7 = (a7 >= 0.0f) ? a7 : a7 * kLeakySlope;
+      // layer1x1 residual (no head_sum accumulation — parametric uses final layer output).
+      float* lin = &_layer_in[static_cast<size_t>(f) * 8];
+      lin[0] += lb0 + lw00 * a0 + lw10 * a1 + lw20 * a2 + lw30 * a3 + lw40 * a4 + lw50 * a5 + lw60 * a6 + lw70 * a7;
+      lin[1] += lb1 + lw01 * a0 + lw11 * a1 + lw21 * a2 + lw31 * a3 + lw41 * a4 + lw51 * a5 + lw61 * a6 + lw71 * a7;
+      lin[2] += lb2 + lw02 * a0 + lw12 * a1 + lw22 * a2 + lw32 * a3 + lw42 * a4 + lw52 * a5 + lw62 * a6 + lw72 * a7;
+      lin[3] += lb3 + lw03 * a0 + lw13 * a1 + lw23 * a2 + lw33 * a3 + lw43 * a4 + lw53 * a5 + lw63 * a6 + lw73 * a7;
+      lin[4] += lb4 + lw04 * a0 + lw14 * a1 + lw24 * a2 + lw34 * a3 + lw44 * a4 + lw54 * a5 + lw64 * a6 + lw74 * a7;
+      lin[5] += lb5 + lw05 * a0 + lw15 * a1 + lw25 * a2 + lw35 * a3 + lw45 * a4 + lw55 * a5 + lw65 * a6 + lw75 * a7;
+      lin[6] += lb6 + lw06 * a0 + lw16 * a1 + lw26 * a2 + lw36 * a3 + lw46 * a4 + lw56 * a5 + lw66 * a6 + lw76 * a7;
+      lin[7] += lb7 + lw07 * a0 + lw17 * a1 + lw27 * a2 + lw37 * a3 + lw47 * a4 + lw57 * a5 + lw67 * a6 + lw77 * a7;
+    }
+  }
+  // [Fork] END: hand-unrolled Channels==8 kernel
+
   else
   {
     using MatCC  = Eigen::Matrix<float, Channels, Channels>;
@@ -2515,8 +2986,9 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
     Eigen::Map<const VecC>   gamma_vec(_film_gamma[li].data());
     Eigen::Map<const VecC>   beta_vec(_film_beta[li].data());
 
-    Eigen::Map<MatCDyn> ztile(_z.data(), Channels, num_frames);
-    Eigen::Map<MatCDyn> lin_block(_layer_in.data(), Channels, num_frames);
+    // Aligned16: _z/_layer_in use Eigen::aligned_allocator (guaranteed 16-byte aligned).
+    Eigen::Map<MatCDyn, Eigen::Aligned16> ztile(_z.data(), Channels, num_frames);
+    Eigen::Map<MatCDyn, Eigen::Aligned16> lin_block(_layer_in.data(), Channels, num_frames);
 
     ztile.setZero();
 
