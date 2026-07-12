@@ -434,4 +434,28 @@ void test_container_switch_resets_before_activation()
   assert(process_one_sample(dsp.get()) == small->process_value);
 }
 
+// Real exported .nam files store "config.layers" as an array of per-layer-group
+// objects (each with its own "channels" field), not the flat integer used by
+// spice-to-nam's ParametricWaveNet format. GetAllowedSizes() must extract the
+// first layer group's "channels" in that case, matching the Swift-side
+// NAMModelLibraryManager.inferChannelRange() convention -- otherwise every
+// submodel's channel count silently falls back to 0 and the model-size picker
+// shows "0 (Lite)" / "0 (Full)" instead of the real widths.
+void test_container_get_allowed_sizes_reads_array_layers_shape()
+{
+  auto j = build_container_json("example_models/wavenet.nam", "example_models/wavenet_a2_max.nam",
+                                "example_models/wavenet_a2_max.nam");
+  auto dsp = nam::get_dsp(j);
+  auto* slimmable = dynamic_cast<nam::SlimmableModel*>(dsp.get());
+  assert(slimmable != nullptr);
+
+  auto sizes = slimmable->GetAllowedSizes();
+  assert(sizes.size() == 3);
+  assert(sizes[0] == 3); // example_models/wavenet.nam: config.layers[0].channels == 3
+  assert(sizes[1] == 4); // example_models/wavenet_a2_max.nam: config.layers[0].channels == 4
+  assert(sizes[2] == 4);
+  for (int size : sizes)
+    assert(size != 0);
+}
+
 } // namespace test_container

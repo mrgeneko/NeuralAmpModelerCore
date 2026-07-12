@@ -174,17 +174,23 @@ std::unique_ptr<DSP> ContainerConfig::create(std::vector<float> weights, double 
 
     // [Fork] BEGIN: representative channels extraction for GetAllowedSizes()
     // Extract a representative channel count for UI display (the model-size picker),
-    // independent of the submodel's concrete DSP type. "layers" in a ParametricWaveNet
-    // config is the channel count itself (a plain integer -- e.g. 3 or 8), not an array
-    // of per-layer objects; see spice-to-nam's README ".param.nam format" reference.
-    // Falls back to 0 (unknown) if the config doesn't expose "layers" as an integer --
-    // the UI degrades to a generic label rather than failing.
+    // independent of the submodel's concrete DSP type. Two "layers" shapes exist:
+    //  - ParametricWaveNet (spice-to-nam): "layers" is the channel count itself, a
+    //    plain integer (e.g. 3 or 8); see spice-to-nam's README ".param.nam format".
+    //  - Standard WaveNet: "layers" is an array of per-layer-group config objects,
+    //    each with its own "channels" field; take the first group's, mirroring the
+    //    Swift-side convention in NAMModelLibraryManager.inferChannelRange().
+    // Falls back to 0 (unknown) if neither shape matches -- the UI degrades to a
+    // generic label rather than failing.
     int channels = 0;
     if (model_json.contains("config") && model_json["config"].contains("layers"))
     {
       const auto& layers = model_json["config"]["layers"];
       if (layers.is_number_integer())
         channels = layers.get<int>();
+      else if (layers.is_array() && !layers.empty() && layers[0].is_object()
+               && layers[0].contains("channels") && layers[0]["channels"].is_number_integer())
+        channels = layers[0]["channels"].get<int>();
     }
     // [Fork] END
 

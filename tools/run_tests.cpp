@@ -316,6 +316,7 @@ int main()
   test_container::test_container_default_is_max_size();
   test_container::test_container_reset_only_resets_active_submodel();
   test_container::test_container_switch_resets_before_activation();
+  test_container::test_container_get_allowed_sizes_reads_array_layers_shape();
 
   // Render --slim tests
   test_render_slim::test_slim_changes_output();
