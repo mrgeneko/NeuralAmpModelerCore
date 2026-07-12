@@ -11,7 +11,7 @@ repo for the full investigation.
 
 Usage:
     python3 gen_a2_fast_kernel.py <N> plain   # A2FastModel<N> (has head_sum)
-    python3 gen_a2_fast_kernel.py <N> param   # ParametricA2FastModel<N, SkipHead> (FiLM + head_sum)
+    python3 gen_a2_fast_kernel.py <N> param   # ParametricA2FastModel<N> (FiLM + head_sum; skip-only)
 
 Before trusting output for a NEW width, validate the generator itself: run it
 against the HIGHEST already-verified width (e.g. `python3
@@ -202,16 +202,12 @@ def gen_parametric(N):
     lines.append("      // LeakyReLU.")
     for i in range(N):
         lines.append(f"      a{i} = (a{i} >= 0.0f) ? a{i} : a{i} * kLeakySlope;")
-    lines.append("      // [Fork] Skip connections: accumulate this layer's post-activation into the")
-    lines.append("      // head sum (same site the static A2FastModel uses -- after FiLM+LeakyReLU, BEFORE the")
-    lines.append("      // l1x1 residual). Compiled away entirely when !SkipHead, so residual models are")
-    lines.append("      // byte-for-byte the same code as before.")
-    lines.append("      if constexpr (SkipHead)")
-    lines.append("      {")
-    lines.append(f"        float* __restrict__ hsum = &_head_sum[static_cast<size_t>(f) * {N}];")
+    lines.append("      // Skip connections: accumulate this layer's post-activation into the head sum")
+    lines.append("      // (same site the static A2FastModel uses -- after FiLM+LeakyReLU, BEFORE the")
+    lines.append("      // l1x1 residual).")
+    lines.append(f"      float* __restrict__ hsum = &_head_sum[static_cast<size_t>(f) * {N}];")
     for i in range(N):
-        lines.append(f"        hsum[{i}] += a{i};")
-    lines.append("      }")
+        lines.append(f"      hsum[{i}] += a{i};")
     lines.append("      // layer1x1 residual.")
     lines.append(f"      float* lin = &_layer_in[static_cast<size_t>(f) * {N}];")
     for c in range(N):

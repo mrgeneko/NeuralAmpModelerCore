@@ -11,18 +11,11 @@
 // generic Eigen-based construction here, which is topology-agnostic with respect to
 // channel count. Structural differences from a standard A2 model:
 //   1. Each layer has an active activation_pre_film FiLM module conditioned on knobs.
-//   2. The head input depends on the model's declared config["parametric"]["head_mode"]:
-//        "skip"     - head reads the SUM of every layer's post-activation, i.e. the
-//                     standard WaveNet skip connections (what stock NAM plugins,
-//                     nam_wavenet.metal and the static a2_fast path all compute).
-//        "residual" - head reads the FINAL layer's l1x1+residual output directly
-//                     (use_final_layer_output_for_head=true). This is the original
-//                     Fork parametric convention and the default for untagged
-//                     (pre-tagging) files.
-//      Running a model under the wrong head silently produces WRONG AUDIO, so head_mode
-//      is honored on load and an unknown parametric "schema_version" is a hard failure.
-//      NOTE: the a2_fast parametric fast path is currently RESIDUAL-ONLY, so skip models
-//      are routed to the generic path until its kernels accumulate _head_sum.
+//   2. The head reads the SUM of every layer's post-activation -- the standard WaveNet
+//      skip connections that NAM, nam_wavenet.metal, the static a2_fast path and every
+//      stock plugin already compute. SKIP-ONLY: there is one head and no mode to choose.
+//      Models must declare head_mode "skip"; a legacy residual/untagged model is REJECTED
+//      on load (its weights would produce garbage under a skip head, silently).
 //
 // Per-layer computation:
 //   audio → rechannel(1→C) → dilated_conv(C→C) ──┐
@@ -90,31 +83,34 @@ struct ParametricParam
   float default_val;
 };
 
-// [Fork] BEGIN: parametric schema + head-mode tagging (shared by the generic path and
-// the a2_fast fast path, so there is ONE source of truth for how a .nam declares its head).
+// [Fork] BEGIN: parametric schema guard
+//
+// Parametric models are SKIP-ONLY. The head reads the SUM of every layer's post-activation
+// -- the standard WaveNet skip connections that NAM, nam_wavenet.metal, the static a2_fast
+// path and every stock plugin already compute. There is exactly one head; there is no mode
+// to choose.
+//
+// The legacy "residual" head (head reads the final layer's residual) was a Fork-only
+// convention. It is GONE. But models carrying it still exist on disk, and residual weights
+// run under a skip head produce garbage (corr ~0.3) with no error -- so we refuse to load
+// them rather than play them.
+//
+// config["parametric"] must therefore declare:
+//   "schema_version" : version of OUR parametric block (separate from the .nam's top-level
+//                      "version", which is NAM's FILE-FORMAT version).
+//   "head_mode"      : "skip". Anything else -- including ABSENT, which means a pre-tagging
+//                      residual model -- is rejected.
 
 /// \brief Highest config["parametric"]["schema_version"] this build understands.
-///
-/// Deliberately SEPARATE from the .nam's top-level "version" (0.7.0), which is NAM's
-/// FILE-FORMAT version and is validated against 0.5.0-0.7.0 -- bumping that for our own
-/// extensions would make loaders reject the file outright.
 constexpr int kMaxParametricSchemaVersion = 1;
 
-/// \brief Which head input a parametric model was TRAINED with.
-enum class ParametricHeadMode
-{
-  Residual, ///< Head reads the final layer's l1x1+residual output (original Fork convention).
-  Skip,     ///< Head reads the SUM of every layer's post-activation (standard WaveNet skip connections).
-};
-
-/// \brief Read config["parametric"]["head_mode"], validating "schema_version".
+/// \brief Validate a parametric model is loadable: known schema, and a SKIP head.
 ///
-/// Absent head_mode => Residual (pre-tagging files). Throws on an unknown head_mode or a
-/// schema_version newer than this build understands: running a model under the wrong head
-/// silently produces WRONG AUDIO, so we fail loudly rather than guess.
+/// Throws with an actionable message on a legacy/residual/untagged model or a schema newer
+/// than we understand. We never guess: a misread head silently yields wrong audio.
 /// \param config The "config" sub-object of a ParametricWaveNet model entry.
-ParametricHeadMode read_head_mode(const nlohmann::json& config);
-// [Fork] END: parametric schema + head-mode tagging
+void require_supported_parametric_model(const nlohmann::json& config);
+// [Fork] END: parametric schema guard
 
 /// \brief WaveNet conditioned on external knob values via per-layer FiLM modules.
 class ParametricWaveNet : public WaveNet

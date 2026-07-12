@@ -368,7 +368,6 @@ int main()
   test_a2_fast::test_parametric_skip_matches_generic_width6();
   test_a2_fast::test_parametric_skip_matches_generic_width7();
   test_a2_fast::test_parametric_skip_matches_generic_standard();
-  test_a2_fast::test_parametric_skip_differs_from_residual();
   test_a2_fast::test_parametric_matches_generic_nano();
   test_a2_fast::test_parametric_matches_generic_medium();
   test_a2_fast::test_parametric_matches_generic_width5();
@@ -384,17 +383,14 @@ int main()
 #endif
 
   // ParametricWaveNet: config parsing, construction, processing, SetKnobValues, registry, factory
-  test_parametric_wavenet::test_head_mode_absent_defaults_to_residual();
-  test_parametric_wavenet::test_head_mode_residual_reads_final_layer();
-  test_parametric_wavenet::test_head_mode_skip_accumulates_skip_connections();
-  test_parametric_wavenet::test_skip_model_takes_fast_path();
-  test_parametric_wavenet::test_residual_model_still_takes_fast_path();
-  test_parametric_wavenet::test_unknown_head_mode_throws();
-  test_parametric_wavenet::test_newer_schema_version_throws();
-  test_parametric_wavenet::test_known_schema_version_accepted();
   test_get_dsp::test_dual_payload_prefers_embedded_model();
   test_get_dsp::test_dual_payload_without_embed_reads_top_level();
   test_get_dsp::test_bogus_top_level_without_embed_throws();
+  test_parametric_wavenet::test_untagged_legacy_model_is_rejected();
+  test_parametric_wavenet::test_residual_model_is_rejected();
+  test_parametric_wavenet::test_unknown_head_mode_is_rejected();
+  test_parametric_wavenet::test_newer_schema_version_is_rejected();
+  test_parametric_wavenet::test_skip_model_loads_and_takes_fast_path();
   test_parametric_wavenet::test_config_parse_valid_json();
   test_parametric_wavenet::test_config_parse_missing_layers_throws();
   test_parametric_wavenet::test_config_parse_invalid_channel_count_throws();

@@ -124,6 +124,7 @@ void test_config_parse_valid_json()
   cfg["layers"] = 3; // nano channel count
   cfg["head_scale"] = 1.0f;
   cfg["parametric"]["condition_size"] = 2;
+  cfg["parametric"]["head_mode"] = "skip";
   cfg["parametric"]["parameters"] = {{{"name", "drive"}, {"minimum", 0.0f}, {"maximum", 1.0f}, {"default", 0.5f}},
                                       {{"name", "tone"}, {"minimum", 0.0f}, {"maximum", 1.0f}, {"default", 0.5f}}};
 
@@ -151,112 +152,70 @@ void test_config_parse_valid_json()
 #endif
 }
 
-// --- [Fork] head_mode + schema_version tagging ---------------------------
+// --- [Fork] SKIP-ONLY: legacy models must be REJECTED, never played -------------
 //
-// A parametric .nam declares which head it was TRAINED with. Running it under the wrong
-// head silently produces WRONG AUDIO, so these tests pin the contract:
-//   - untagged (legacy) => residual
-//   - "skip"            => skip-accumulating head (use_final_layer_output_for_head=false)
-//   - a SKIP model must NOT be routed to the residual-only fast path
-//   - unknown head_mode / newer schema_version => hard failure, never a guess
+// Parametric models are skip-only. The residual head is gone. But residual models still
+// exist on disk, and residual weights under a skip head produce garbage (corr ~0.3) with no
+// error -- so the loader refuses them. These tests pin that refusal: it is the entire safety
+// story now that there is no second mode to fall back to.
 
-static nlohmann::json make_tagged_cfg(int channels, const char* head_mode, int schema = -1)
+static nlohmann::json make_cfg(int channels, const char* head_mode, int schema = -1)
 {
   nlohmann::json cfg;
   cfg["layers"] = channels;
   cfg["head_scale"] = 1.0f;
   cfg["parametric"]["condition_size"] = 2;
   if (head_mode != nullptr)
-    cfg["parametric"]["head_mode"] = head_mode;
+    cfg["parametric"]["head_mode"] = head_mode;   // nullptr => untagged (legacy)
   if (schema >= 0)
     cfg["parametric"]["schema_version"] = schema;
   return cfg;
 }
 
-// Reads the head flag off the GENERIC config (the fast path has no such field).
-static bool generic_uses_final_layer_head(const nlohmann::json& cfg)
+static bool rejects(const nlohmann::json& cfg)
 {
-  auto config = nam::wavenet::create_parametric_config_generic(cfg, 48000.0);
-  auto* pwn = dynamic_cast<nam::wavenet::ParametricWaveNetConfig*>(config.get());
-  assert(pwn != nullptr);
-  assert(pwn->layer_array_params.size() == 1);
-  return pwn->layer_array_params[0].use_final_layer_output_for_head;
-}
-
-void test_head_mode_absent_defaults_to_residual()
-{
-  // Pre-tagging files have no head_mode and are residual by definition.
-  assert(generic_uses_final_layer_head(make_tagged_cfg(3, nullptr)) == true);
-}
-
-void test_head_mode_residual_reads_final_layer()
-{
-  assert(generic_uses_final_layer_head(make_tagged_cfg(3, "residual")) == true);
-}
-
-void test_head_mode_skip_accumulates_skip_connections()
-{
-  assert(generic_uses_final_layer_head(make_tagged_cfg(3, "skip")) == false);
-}
-
-void test_skip_model_takes_fast_path()
-{
-  // Since migration 5b the fast path serves BOTH heads (ParametricA2FastModel is templated
-  // on <Channels, SkipHead>), so a skip model keeps the ~17x fast path rather than falling
-  // back to the generic Eigen reference. Its numerical correctness is proven separately, per
-  // width, by test_a2_fast::test_parametric_skip_matches_generic_*.
-  auto config = nam::wavenet::create_parametric_config(make_tagged_cfg(3, "skip"), 48000.0);
-  assert(config != nullptr);
-#if defined(NAM_ENABLE_A2_FAST)
-  assert(dynamic_cast<nam::wavenet::ParametricWaveNetConfig*>(config.get()) == nullptr);
-#endif
-  // The generic path still honors the tag (it is the reference the fast path is checked against).
-  assert(generic_uses_final_layer_head(make_tagged_cfg(3, "skip")) == false);
-}
-
-void test_residual_model_still_takes_fast_path()
-{
-  // Residual models keep the ~17x fast path (no regression for shipped models).
-  auto config = nam::wavenet::create_parametric_config(make_tagged_cfg(3, "residual"), 48000.0);
-  assert(config != nullptr);
-#if defined(NAM_ENABLE_A2_FAST)
-  assert(dynamic_cast<nam::wavenet::ParametricWaveNetConfig*>(config.get()) == nullptr);
-#endif
-}
-
-void test_unknown_head_mode_throws()
-{
-  bool threw = false;
   try
   {
-    nam::wavenet::create_parametric_config(make_tagged_cfg(3, "bogus"), 48000.0);
+    nam::wavenet::create_parametric_config(cfg, 48000.0);
   }
   catch (const std::runtime_error&)
   {
-    threw = true;
+    return true;
   }
-  assert(threw);
+  return false;
 }
 
-void test_newer_schema_version_throws()
+void test_untagged_legacy_model_is_rejected()
+{
+  // No head_mode == a pre-tagging model == residual. It must NOT load and play as skip.
+  assert(rejects(make_cfg(3, nullptr)));
+}
+
+void test_residual_model_is_rejected()
+{
+  assert(rejects(make_cfg(3, "residual")));
+}
+
+void test_unknown_head_mode_is_rejected()
+{
+  assert(rejects(make_cfg(3, "bogus")));
+}
+
+void test_newer_schema_version_is_rejected()
 {
   // A file from a future build must fail loudly rather than be silently misread.
-  bool threw = false;
-  try
-  {
-    nam::wavenet::create_parametric_config(make_tagged_cfg(3, "skip", 999), 48000.0);
-  }
-  catch (const std::runtime_error&)
-  {
-    threw = true;
-  }
-  assert(threw);
+  assert(rejects(make_cfg(3, "skip", 999)));
 }
 
-void test_known_schema_version_accepted()
+void test_skip_model_loads_and_takes_fast_path()
 {
-  auto config = nam::wavenet::create_parametric_config(make_tagged_cfg(3, "skip", 1), 48000.0);
+  auto config = nam::wavenet::create_parametric_config(make_cfg(3, "skip", 1), 48000.0);
   assert(config != nullptr);
+#if defined(NAM_ENABLE_A2_FAST)
+  // Skip-only: the fast path always accumulates _head_sum, so it serves every parametric
+  // model. Numerical correctness per width: test_a2_fast::test_parametric_skip_matches_generic_*.
+  assert(dynamic_cast<nam::wavenet::ParametricWaveNetConfig*>(config.get()) == nullptr);
+#endif
 }
 
 void test_config_parse_missing_layers_throws()
@@ -264,6 +223,7 @@ void test_config_parse_missing_layers_throws()
   nlohmann::json cfg;
   cfg["head_scale"] = 1.0f;
   cfg["parametric"]["condition_size"] = 2;
+  cfg["parametric"]["head_mode"] = "skip";
 
   bool threw = false;
   try
@@ -285,6 +245,7 @@ void test_config_parse_invalid_channel_count_throws()
   cfg["layers"] = 0; // invalid
   cfg["head_scale"] = 1.0f;
   cfg["parametric"]["condition_size"] = 2;
+  cfg["parametric"]["head_mode"] = "skip";
 
   bool threw = false;
   try
@@ -309,6 +270,7 @@ void test_config_parse_intermediate_channel_count_does_not_throw()
     cfg["layers"] = channels;
     cfg["head_scale"] = 1.0f;
     cfg["parametric"]["condition_size"] = 1;
+  cfg["parametric"]["head_mode"] = "skip";
     cfg["parametric"]["parameters"] = {{{"name", "drive"}, {"minimum", 0.0f}, {"maximum", 1.0f}, {"default", 0.5f}}};
 
     auto config = nam::wavenet::create_parametric_config(cfg, 48000.0);
@@ -321,6 +283,7 @@ void test_config_parse_missing_head_scale_throws()
   nlohmann::json cfg;
   cfg["layers"] = 3;
   cfg["parametric"]["condition_size"] = 2;
+  cfg["parametric"]["head_mode"] = "skip";
 
   bool threw = false;
   try
@@ -358,6 +321,7 @@ void test_config_parse_missing_condition_size_throws()
   cfg["layers"] = 3;
   cfg["head_scale"] = 1.0f;
   cfg["parametric"]["parameters"] = nlohmann::json::array();
+  cfg["parametric"]["head_mode"] = "skip";
 
   bool threw = false;
   try
@@ -377,6 +341,7 @@ void test_config_parse_condition_size_too_large_throws()
   cfg["layers"] = 3;
   cfg["head_scale"] = 1.0f;
   cfg["parametric"]["condition_size"] = nam::wavenet::ParametricWaveNet::kMaxParams + 1;
+  cfg["parametric"]["head_mode"] = "skip";
 
   bool threw = false;
   try
@@ -397,6 +362,7 @@ void test_config_parse_standard_channel_count()
   cfg["layers"] = 8;
   cfg["head_scale"] = 0.5f;
   cfg["parametric"]["condition_size"] = 1;
+  cfg["parametric"]["head_mode"] = "skip";
 
   auto config = nam::wavenet::create_parametric_config(cfg, 48000.0);
   assert(config != nullptr);
@@ -416,6 +382,7 @@ void test_config_parse_param_defs_optional()
   cfg["layers"] = 3;
   cfg["head_scale"] = 1.0f;
   cfg["parametric"]["condition_size"] = 3;
+  cfg["parametric"]["head_mode"] = "skip";
   // no "parameters" key
 
   auto config = nam::wavenet::create_parametric_config(cfg, 48000.0);
@@ -596,6 +563,7 @@ void test_factory_creates_and_processes_nano()
   cfg["layers"] = 3;
   cfg["head_scale"] = 1.0f;
   cfg["parametric"]["condition_size"] = 1;
+  cfg["parametric"]["head_mode"] = "skip";
   cfg["parametric"]["parameters"] = {{{"name", "drive"}, {"minimum", 0.0f}, {"maximum", 1.0f}, {"default", 0.5f}}};
 
   auto config = nam::wavenet::create_parametric_config(cfg, 48000.0);
@@ -626,6 +594,7 @@ void test_factory_nano_knobs_change_output()
   cfg["layers"] = 3;
   cfg["head_scale"] = 1.0f;
   cfg["parametric"]["condition_size"] = 1;
+  cfg["parametric"]["head_mode"] = "skip";
 
   auto config_lo = nam::wavenet::create_parametric_config(cfg, 48000.0);
   auto config_hi = nam::wavenet::create_parametric_config(cfg, 48000.0);
@@ -719,6 +688,7 @@ void test_dc_blocker_removes_dc_at_silence()
   cfg["layers"] = 3; // nano (C=3)
   cfg["head_scale"] = 1.0f;
   cfg["parametric"]["condition_size"] = 1;
+  cfg["parametric"]["head_mode"] = "skip";
 
   auto config = nam::wavenet::create_parametric_config(cfg, 48000.0);
   std::vector<float> weights(kA2NanoWeightCount_1param, 0.1f);

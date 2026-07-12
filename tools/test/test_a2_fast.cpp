@@ -177,10 +177,14 @@ void compare(const std::vector<NAM_SAMPLE>& a, const std::vector<NAM_SAMPLE>& b,
 // Build a compact ParametricWaveNet config (config["layers"] is an int, not an array).
 nlohmann::json build_parametric_a2_config(int channels, int num_params)
 {
+  // [Fork] Parametric models are SKIP-ONLY; an untagged/residual model is rejected
+  // on load, so every test config must declare the tag.
   nlohmann::json cfg;
   cfg["layers"] = channels;
   cfg["head_scale"] = 0.01f;
   cfg["parametric"]["condition_size"] = num_params;
+  cfg["parametric"]["schema_version"] = 1;
+  cfg["parametric"]["head_mode"] = "skip";
   nlohmann::json params = nlohmann::json::array();
   for (int i = 0; i < num_params; i++)
     params.push_back({{"name", "knob" + std::to_string(i)}, {"minimum", 0.0f}, {"maximum", 1.0f}, {"default", 0.5f}});
@@ -485,36 +489,6 @@ void test_parametric_skip_matches_generic_width6()   { test_parametric_skip_matc
 void test_parametric_skip_matches_generic_width7()   { test_parametric_skip_matches_generic(7, 2); }
 void test_parametric_skip_matches_generic_standard() { test_parametric_skip_matches_generic(8, 2); }
 
-// Guards against a FALSE PASS. If skip and residual happened to produce the same audio, every
-// parity test above would still pass even if head_mode were ignored entirely. They must differ.
-void test_parametric_skip_differs_from_residual()
-{
-  const int channels = 8, num_params = 2;
-  const int weight_count = parametric_a2_weight_count(channels, num_params);
-  const auto weights = make_deterministic_weights(weight_count, /*seed=*/0xD1FF0011u);
-
-  auto build = [&](const char* head_mode) {
-    auto cfg = build_parametric_a2_config(channels, num_params);
-    cfg["parametric"]["head_mode"] = head_mode;
-    auto c = nam::wavenet::a2_fast::create_parametric_a2_fast_config(cfg, 48000.0);
-    std::vector<float> w = weights;
-    return c->create(std::move(w), 48000.0);
-  };
-
-  auto skip_dsp = build("skip");
-  auto residual_dsp = build("residual");
-
-  const int total = 2048;
-  const auto input = make_test_input(total, 48000.0);
-  const auto out_skip = run_dsp(*skip_dsp, input, 256);
-  const auto out_residual = run_dsp(*residual_dsp, input, 256);
-
-  double max_diff = 0.0;
-  for (size_t i = 0; i < out_skip.size() && i < out_residual.size(); i++)
-    max_diff = std::max(max_diff, std::abs(static_cast<double>(out_skip[i])
-                                           - static_cast<double>(out_residual[i])));
-  assert(max_diff > 1e-3); // the two heads are genuinely different functions
-}
 // [Fork] END: SKIP-head parametric fast-path verification
 
 void test_parametric_matches_generic_nano()
