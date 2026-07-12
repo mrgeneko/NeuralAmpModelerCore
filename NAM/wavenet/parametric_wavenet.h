@@ -90,6 +90,32 @@ struct ParametricParam
   float default_val;
 };
 
+// [Fork] BEGIN: parametric schema + head-mode tagging (shared by the generic path and
+// the a2_fast fast path, so there is ONE source of truth for how a .nam declares its head).
+
+/// \brief Highest config["parametric"]["schema_version"] this build understands.
+///
+/// Deliberately SEPARATE from the .nam's top-level "version" (0.7.0), which is NAM's
+/// FILE-FORMAT version and is validated against 0.5.0-0.7.0 -- bumping that for our own
+/// extensions would make loaders reject the file outright.
+constexpr int kMaxParametricSchemaVersion = 1;
+
+/// \brief Which head input a parametric model was TRAINED with.
+enum class ParametricHeadMode
+{
+  Residual, ///< Head reads the final layer's l1x1+residual output (original Fork convention).
+  Skip,     ///< Head reads the SUM of every layer's post-activation (standard WaveNet skip connections).
+};
+
+/// \brief Read config["parametric"]["head_mode"], validating "schema_version".
+///
+/// Absent head_mode => Residual (pre-tagging files). Throws on an unknown head_mode or a
+/// schema_version newer than this build understands: running a model under the wrong head
+/// silently produces WRONG AUDIO, so we fail loudly rather than guess.
+/// \param config The "config" sub-object of a ParametricWaveNet model entry.
+ParametricHeadMode read_head_mode(const nlohmann::json& config);
+// [Fork] END: parametric schema + head-mode tagging
+
 /// \brief WaveNet conditioned on external knob values via per-layer FiLM modules.
 class ParametricWaveNet : public WaveNet
 {

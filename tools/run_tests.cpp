@@ -362,6 +362,13 @@ int main()
   test_a2_fast::test_matches_generic_width6();
   test_a2_fast::test_matches_generic_width7();
   test_a2_fast::test_matches_generic_standard();
+  test_a2_fast::test_parametric_skip_matches_generic_nano();
+  test_a2_fast::test_parametric_skip_matches_generic_medium();
+  test_a2_fast::test_parametric_skip_matches_generic_width5();
+  test_a2_fast::test_parametric_skip_matches_generic_width6();
+  test_a2_fast::test_parametric_skip_matches_generic_width7();
+  test_a2_fast::test_parametric_skip_matches_generic_standard();
+  test_a2_fast::test_parametric_skip_differs_from_residual();
   test_a2_fast::test_parametric_matches_generic_nano();
   test_a2_fast::test_parametric_matches_generic_medium();
   test_a2_fast::test_parametric_matches_generic_width5();
@@ -380,7 +387,7 @@ int main()
   test_parametric_wavenet::test_head_mode_absent_defaults_to_residual();
   test_parametric_wavenet::test_head_mode_residual_reads_final_layer();
   test_parametric_wavenet::test_head_mode_skip_accumulates_skip_connections();
-  test_parametric_wavenet::test_skip_model_avoids_residual_fast_path();
+  test_parametric_wavenet::test_skip_model_takes_fast_path();
   test_parametric_wavenet::test_residual_model_still_takes_fast_path();
   test_parametric_wavenet::test_unknown_head_mode_throws();
   test_parametric_wavenet::test_newer_schema_version_throws();

@@ -439,6 +439,84 @@ void test_parametric_matches_generic(int channels, int num_params)
   }
 }
 
+// [Fork] BEGIN: SKIP-head parametric fast-path verification (migration 5b).
+//
+// The fast path accumulates _head_sum inside hand-unrolled per-width SIMD kernels; the
+// generic path gets its skip accumulation from LayerArray (use_final_layer_output_for_head
+// = false), which is long-standing, well-tested code. Comparing the two is what proves the
+// SIMD accumulate is correct -- separately for every width we ship.
+void test_parametric_skip_matches_generic(int channels, int num_params)
+{
+  auto cfg = build_parametric_a2_config(channels, num_params);
+  cfg["parametric"]["head_mode"] = "skip";
+
+  const int weight_count = parametric_a2_weight_count(channels, num_params);
+  const auto weights = make_deterministic_weights(weight_count, /*seed=*/0x5C1B0000u + channels * 100 + num_params);
+
+  auto fast_cfg = nam::wavenet::a2_fast::create_parametric_a2_fast_config(cfg, 48000.0);
+  std::vector<float> w_fast = weights;
+  auto fast_dsp = fast_cfg->create(std::move(w_fast), 48000.0);
+
+  auto generic_cfg = nam::wavenet::create_parametric_config_generic(cfg, 48000.0);
+  std::vector<float> w_gen = weights;
+  auto generic_dsp = generic_cfg->create(std::move(w_gen), 48000.0);
+
+  // Exercise a non-default knob setting so FiLM is genuinely active, not just its default.
+  std::vector<float> knobs(num_params);
+  for (int i = 0; i < num_params; i++)
+    knobs[i] = 0.2f + 0.6f * (static_cast<float>(i) / std::max(1, num_params));
+  fast_dsp->SetKnobValues(knobs);
+  generic_dsp->SetKnobValues(knobs);
+
+  const int total = 2048;
+  const auto input = make_test_input(total, 48000.0);
+  for (int block : {64, 256})
+  {
+    const auto out_generic = run_dsp(*generic_dsp, input, block);
+    const auto out_fast = run_dsp(*fast_dsp, input, block);
+    compare_parametric(out_generic, out_fast, channels, block, /*tol=*/5e-5);
+  }
+}
+
+void test_parametric_skip_matches_generic_nano()     { test_parametric_skip_matches_generic(3, 1); }
+void test_parametric_skip_matches_generic_medium()   { test_parametric_skip_matches_generic(4, 1); }
+void test_parametric_skip_matches_generic_width5()   { test_parametric_skip_matches_generic(5, 2); }
+void test_parametric_skip_matches_generic_width6()   { test_parametric_skip_matches_generic(6, 2); }
+void test_parametric_skip_matches_generic_width7()   { test_parametric_skip_matches_generic(7, 2); }
+void test_parametric_skip_matches_generic_standard() { test_parametric_skip_matches_generic(8, 2); }
+
+// Guards against a FALSE PASS. If skip and residual happened to produce the same audio, every
+// parity test above would still pass even if head_mode were ignored entirely. They must differ.
+void test_parametric_skip_differs_from_residual()
+{
+  const int channels = 8, num_params = 2;
+  const int weight_count = parametric_a2_weight_count(channels, num_params);
+  const auto weights = make_deterministic_weights(weight_count, /*seed=*/0xD1FF0011u);
+
+  auto build = [&](const char* head_mode) {
+    auto cfg = build_parametric_a2_config(channels, num_params);
+    cfg["parametric"]["head_mode"] = head_mode;
+    auto c = nam::wavenet::a2_fast::create_parametric_a2_fast_config(cfg, 48000.0);
+    std::vector<float> w = weights;
+    return c->create(std::move(w), 48000.0);
+  };
+
+  auto skip_dsp = build("skip");
+  auto residual_dsp = build("residual");
+
+  const int total = 2048;
+  const auto input = make_test_input(total, 48000.0);
+  const auto out_skip = run_dsp(*skip_dsp, input, 256);
+  const auto out_residual = run_dsp(*residual_dsp, input, 256);
+
+  double max_diff = 0.0;
+  for (size_t i = 0; i < out_skip.size() && i < out_residual.size(); i++)
+    max_diff = std::max(max_diff, std::abs(static_cast<double>(out_skip[i])
+                                           - static_cast<double>(out_residual[i])));
+  assert(max_diff > 1e-3); // the two heads are genuinely different functions
+}
+// [Fork] END: SKIP-head parametric fast-path verification
+
 void test_parametric_matches_generic_nano()
 {
   test_parametric_matches_generic(3, 1);

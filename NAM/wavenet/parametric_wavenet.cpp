@@ -139,14 +139,8 @@ std::unique_ptr<DSP> ParametricWaveNetConfig::create(std::vector<float> weights,
 // Both keys are absent in pre-tagging files, which are residual by definition.
 // Running a model under the wrong head produces WRONG AUDIO with no error, so we never
 // guess: an unknown (newer) schema is a hard load failure.
-constexpr int kMaxParametricSchemaVersion = 1;
-
-enum class ParametricHeadMode
-{
-  Residual,
-  Skip
-};
-
+// kMaxParametricSchemaVersion / ParametricHeadMode are declared in parametric_wavenet.h so
+// the a2_fast fast path reads the tag through this SAME function -- one source of truth.
 ParametricHeadMode read_head_mode(const nlohmann::json& config)
 {
   const auto& par = config.at("parametric");
@@ -318,20 +312,13 @@ std::unique_ptr<ModelConfig> create_parametric_config(const nlohmann::json& conf
   // topology-agnostic -- nothing in it depends on a specific width).
 #if defined(NAM_ENABLE_A2_FAST)
   {
-    // [Fork] The fast path is RESIDUAL-ONLY: ParametricA2FastModel's head reads the
-    // final layer residual and it has no skip accumulator. Routing a SKIP-trained model
-    // through it would silently produce wrong audio, so gate on the declared head_mode.
-    // Skip models fall through to the generic Eigen path below -- numerically correct, but
-    // ~17x slower. Removing that penalty means porting _head_sum accumulation into the
-    // per-width kernels (the static A2FastModel already does exactly this); tracked as
-    // spice-to-nam docs/rearchitecture_skip_accumulation.md section 5b.
-    // An untagged (legacy) file has no "parametric" block only if it is malformed -- in
-    // that case fall through so the generic path raises the proper error.
-    const bool residual_head = !config.contains("parametric")
-                               || read_head_mode(config) == ParametricHeadMode::Residual;
-
+    // [Fork] The fast path now serves BOTH heads: ParametricA2FastModel is templated
+    // on <Channels, SkipHead>, so a skip model accumulates _head_sum while a residual model
+    // has that accumulation compiled out entirely (zero cost). create_parametric_a2_fast_config()
+    // reads the declared head_mode and picks the instantiation, so no head-mode gate is
+    // needed here -- skip models keep the ~17x fast path instead of falling back to Eigen.
     int fast_channels = 0, fast_num_params = 0;
-    if (residual_head && a2_fast::is_parametric_a2_shape(config, &fast_channels, &fast_num_params))
+    if (a2_fast::is_parametric_a2_shape(config, &fast_channels, &fast_num_params))
       return a2_fast::create_parametric_a2_fast_config(config, sampleRate);
   }
 #endif

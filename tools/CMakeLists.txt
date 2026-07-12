@@ -44,6 +44,7 @@ else()
 endif()
 add_executable(benchmodel_bufsize benchmodel_bufsize.cpp ${NAM_SOURCES})
 add_executable(bench_a2_fast bench_a2_fast.cpp ${NAM_SOURCES})
+add_executable(bench_skip bench_skip.cpp ${NAM_SOURCES})
 target_compile_features(bench_a2_fast PUBLIC cxx_std_20)
 set_target_properties(bench_a2_fast PROPERTIES
 	CXX_VISIBILITY_PRESET hidden

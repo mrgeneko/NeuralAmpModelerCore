@@ -1903,7 +1903,7 @@ bool film_inactive(const nlohmann::json& layer, const char* key)
 // Everything else (ring buffers, weight loading skeleton, head conv) is
 // identical to A2FastModel so the same throughput characteristics apply.
 // =============================================================================
-template <int Channels>
+template <int Channels, bool SkipHead>
 class ParametricA2FastModel : public DSP
 {
 public:
@@ -2004,6 +2004,9 @@ private:
   // Eigen::aligned_allocator guarantees 16-byte alignment for the Eigen::Map<..., Eigen::Aligned16>
   // views below -- see A2FastModel's identical comment above for why this matters.
   std::vector<float, Eigen::aligned_allocator<float>> _layer_in; // layer input / residual accumulator
+  // [Fork] Skip accumulator: sum of every layer's post-activation. Only allocated and
+  // written when SkipHead -- residual models never touch it and pay nothing for it.
+  std::vector<float, Eigen::aligned_allocator<float>> _head_sum;
   std::vector<float, Eigen::aligned_allocator<float>> _z;        // per-layer conv accumulator
   std::vector<float> _cond;     // float32 copy of input audio
   std::vector<float> _head_out; // float32 head output
@@ -2029,8 +2032,8 @@ private:
 };
 
 // --- Construction ---
-template <int Channels>
-ParametricA2FastModel<Channels>::ParametricA2FastModel(std::vector<float> weights,
+template <int Channels, bool SkipHead>
+ParametricA2FastModel<Channels, SkipHead>::ParametricA2FastModel(std::vector<float> weights,
                                                         double expected_sample_rate,
                                                         int num_params,
                                                         std::vector<ParametricParam> param_defs)
@@ -2068,8 +2071,8 @@ ParametricA2FastModel<Channels>::ParametricA2FastModel(std::vector<float> weight
 //   rechannel.weight (C floats)
 //   per layer × 23: conv.w + conv.b + mixin.w + l1x1.w + l1x1.b + film.net.w + film.net.b
 //   head.w + head.b + head_scale
-template <int Channels>
-void ParametricA2FastModel<Channels>::_load_weights(std::vector<float>& weights)
+template <int Channels, bool SkipHead>
+void ParametricA2FastModel<Channels, SkipHead>::_load_weights(std::vector<float>& weights)
 {
   auto it = weights.begin();
   const auto end = weights.end();
@@ -2129,8 +2132,8 @@ void ParametricA2FastModel<Channels>::_load_weights(std::vector<float>& weights)
 }
 
 // --- SetKnobValues ---
-template <int Channels>
-void ParametricA2FastModel<Channels>::SetKnobValues(const std::vector<float>& values)
+template <int Channels, bool SkipHead>
+void ParametricA2FastModel<Channels, SkipHead>::SetKnobValues(const std::vector<float>& values)
 {
   const int n = std::min(static_cast<int>(values.size()), _num_params);
   for (int k = 0; k < n; k++)
@@ -2138,8 +2141,8 @@ void ParametricA2FastModel<Channels>::SetKnobValues(const std::vector<float>& va
 }
 
 // --- _recompute_film: rebuild gamma/beta from knob atomics (audio thread, once per buffer) ---
-template <int Channels>
-void ParametricA2FastModel<Channels>::_recompute_film()
+template <int Channels, bool SkipHead>
+void ParametricA2FastModel<Channels, SkipHead>::_recompute_film()
 {
   // [Fork] One-pole smooth toward the atomic target each buffer.
   // Eliminates zipper noise when UI sliders move; adds ~20 ms of imperceptible lag.
@@ -2170,12 +2173,14 @@ void ParametricA2FastModel<Channels>::_recompute_film()
 }
 
 // --- Buffer sizing ---
-template <int Channels>
-void ParametricA2FastModel<Channels>::SetMaxBufferSize(int maxBufferSize)
+template <int Channels, bool SkipHead>
+void ParametricA2FastModel<Channels, SkipHead>::SetMaxBufferSize(int maxBufferSize)
 {
   DSP::SetMaxBufferSize(maxBufferSize);
 
   _layer_in.assign(static_cast<size_t>(Channels) * maxBufferSize, 0.0f);
+  if constexpr (SkipHead)
+    _head_sum.assign(static_cast<size_t>(Channels) * maxBufferSize, 0.0f);
   _z.assign(static_cast<size_t>(Channels) * maxBufferSize, 0.0f);
   _cond.assign(static_cast<size_t>(maxBufferSize), 0.0f);
   _head_out.assign(static_cast<size_t>(maxBufferSize), 0.0f);
@@ -2208,8 +2213,8 @@ void ParametricA2FastModel<Channels>::SetMaxBufferSize(int maxBufferSize)
 }
 
 // --- Reset (recomputes DC blocker coefficient for new sample rate) ---
-template <int Channels>
-void ParametricA2FastModel<Channels>::Reset(double sampleRate, int maxBufferSize)
+template <int Channels, bool SkipHead>
+void ParametricA2FastModel<Channels, SkipHead>::Reset(double sampleRate, int maxBufferSize)
 {
   _dc_alpha = 1.0f - 2.0f * static_cast<float>(M_PI) * 20.0f / static_cast<float>(sampleRate);
   _dc_x_prev = 0.0f;
@@ -2222,8 +2227,8 @@ void ParametricA2FastModel<Channels>::Reset(double sampleRate, int maxBufferSize
 }
 
 // --- Ring write (identical to A2FastModel) ---
-template <int Channels>
-void ParametricA2FastModel<Channels>::_ring_write(Layer& L, int num_frames)
+template <int Channels, bool SkipHead>
+void ParametricA2FastModel<Channels, SkipHead>::_ring_write(Layer& L, int num_frames)
 {
   #if NAM_A2_RING_MODE == 1
   const int mbs = GetMaxBufferSize();
@@ -2253,13 +2258,18 @@ void ParametricA2FastModel<Channels>::_ring_write(Layer& L, int num_frames)
 }
 
 // --- Head ring write: source is _layer_in (final layer residual, NOT a skip sum) ---
-template <int Channels>
-void ParametricA2FastModel<Channels>::_head_ring_write(int num_frames)
+template <int Channels, bool SkipHead>
+void ParametricA2FastModel<Channels, SkipHead>::_head_ring_write(int num_frames)
 {
+  // [Fork] Head input depends on the trained head:
+  //   SkipHead   -> _head_sum  (sum of every layer's post-activation; NAM standard)
+  //   !SkipHead  -> _layer_in  (final layer's l1x1+residual output)
+  // SkipHead is a template parameter, so this selection folds away at compile time.
+  const float* const src = SkipHead ? _head_sum.data() : _layer_in.data();
+
   #if NAM_A2_RING_MODE == 1
   const int mbs = GetMaxBufferSize();
   float* const hist = _head_history.data();
-  const float* const src = _layer_in.data(); // <-- final layer residual output
   const int wp = _head_write_pos;
   const int first = std::min(num_frames, _head_pow2_size - wp);
   std::memcpy(hist + static_cast<size_t>(wp) * Channels, src, static_cast<size_t>(first) * Channels * sizeof(float));
@@ -2278,16 +2288,16 @@ void ParametricA2FastModel<Channels>::_head_ring_write(int num_frames)
                  static_cast<size_t>(keep) * Channels * sizeof(float));
     _head_write_pos = keep;
   }
-  std::memcpy(_head_history.data() + static_cast<size_t>(_head_write_pos) * Channels, _layer_in.data(),
+  std::memcpy(_head_history.data() + static_cast<size_t>(_head_write_pos) * Channels, src,
               static_cast<size_t>(num_frames) * Channels * sizeof(float));
   _head_write_pos += num_frames;
   #endif
 }
 
-// --- Per-layer forward: FiLM applied, no skip-connection accumulation ---
-template <int Channels>
+// --- Per-layer forward: FiLM applied; head_sum accumulated when SkipHead ---
+template <int Channels, bool SkipHead>
 template <int KernelSize>
-void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const float* cond, int num_frames)
+void ParametricA2FastModel<Channels, SkipHead>::_layer_forward_k(Layer& L, int li, const float* cond, int num_frames)
 {
   constexpr int K = KernelSize;
   const int D = L.dilation;
@@ -2339,7 +2349,7 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       }
     }
 
-    // Final tap + mixin + FiLM + LeakyReLU + l1x1 residual (no head_sum accumulation).
+    // Final tap + mixin + FiLM + LeakyReLU + [head_sum accumulate] + l1x1 residual.
     const float* wk_last = &L.conv_w[static_cast<size_t>(K - 1) * 9];
     const int tap_base_last = tap_base_phys(0);
     const float cw0=wk_last[0],cw1=wk_last[1],cw2=wk_last[2];
@@ -2371,7 +2381,18 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       a0 = (a0 >= 0.0f) ? a0 : a0 * kLeakySlope;
       a1 = (a1 >= 0.0f) ? a1 : a1 * kLeakySlope;
       a2 = (a2 >= 0.0f) ? a2 : a2 * kLeakySlope;
-      // layer1x1 residual (no head_sum accumulation — parametric uses final layer output).
+      // [Fork] Skip connections: accumulate this layer's post-activation into the
+      // head sum (same site the static A2FastModel uses -- after FiLM+LeakyReLU, BEFORE the
+      // l1x1 residual). Compiled away entirely when !SkipHead, so residual models are
+      // byte-for-byte the same code as before.
+      if constexpr (SkipHead)
+      {
+        float* __restrict__ hsum = &_head_sum[static_cast<size_t>(f) * 3];
+        hsum[0] += a0;
+        hsum[1] += a1;
+        hsum[2] += a2;
+      }
+      // layer1x1 residual.
       float* lin = &_layer_in[static_cast<size_t>(f) * 3];
       lin[0] += lb0 + lw00*a0 + lw10*a1 + lw20*a2;
       lin[1] += lb1 + lw01*a0 + lw11*a1 + lw21*a2;
@@ -2432,7 +2453,7 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       }
     }
 
-    // Final tap + mixin + FiLM + LeakyReLU + l1x1 residual (no head_sum accumulation).
+    // Final tap + mixin + FiLM + LeakyReLU + [head_sum accumulate] + l1x1 residual.
     const float* wk_last = &L.conv_w[static_cast<size_t>(K - 1) * 16];
     const int tap_base_last = tap_base_phys(0);
     const float cw0 = wk_last[0], cw1 = wk_last[1], cw2 = wk_last[2], cw3 = wk_last[3];
@@ -2470,7 +2491,19 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       a1 = (a1 >= 0.0f) ? a1 : a1 * kLeakySlope;
       a2 = (a2 >= 0.0f) ? a2 : a2 * kLeakySlope;
       a3 = (a3 >= 0.0f) ? a3 : a3 * kLeakySlope;
-      // layer1x1 residual (no head_sum accumulation — parametric uses final layer output).
+      // [Fork] Skip connections: accumulate this layer's post-activation into the
+      // head sum (same site the static A2FastModel uses -- after FiLM+LeakyReLU, BEFORE the
+      // l1x1 residual). Compiled away entirely when !SkipHead, so residual models are
+      // byte-for-byte the same code as before.
+      if constexpr (SkipHead)
+      {
+        float* __restrict__ hsum = &_head_sum[static_cast<size_t>(f) * 4];
+        hsum[0] += a0;
+        hsum[1] += a1;
+        hsum[2] += a2;
+        hsum[3] += a3;
+      }
+      // layer1x1 residual.
       float* lin = &_layer_in[static_cast<size_t>(f) * 4];
       lin[0] += lb0 + lw00 * a0 + lw10 * a1 + lw20 * a2 + lw30 * a3;
       lin[1] += lb1 + lw01 * a0 + lw11 * a1 + lw21 * a2 + lw31 * a3;
@@ -2531,7 +2564,7 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       }
     }
 
-    // Final tap + mixin + FiLM + LeakyReLU + l1x1 residual (no head_sum accumulation).
+    // Final tap + mixin + FiLM + LeakyReLU + [head_sum accumulate] + l1x1 residual.
     const float* wk_last = &L.conv_w[static_cast<size_t>(K - 1) * 25];
     const int tap_base_last = tap_base_phys(0);
     const float cw0 = wk_last[0], cw1 = wk_last[1], cw2 = wk_last[2], cw3 = wk_last[3], cw4 = wk_last[4];
@@ -2575,7 +2608,20 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       a2 = (a2 >= 0.0f) ? a2 : a2 * kLeakySlope;
       a3 = (a3 >= 0.0f) ? a3 : a3 * kLeakySlope;
       a4 = (a4 >= 0.0f) ? a4 : a4 * kLeakySlope;
-      // layer1x1 residual (no head_sum accumulation — parametric uses final layer output).
+      // [Fork] Skip connections: accumulate this layer's post-activation into the
+      // head sum (same site the static A2FastModel uses -- after FiLM+LeakyReLU, BEFORE the
+      // l1x1 residual). Compiled away entirely when !SkipHead, so residual models are
+      // byte-for-byte the same code as before.
+      if constexpr (SkipHead)
+      {
+        float* __restrict__ hsum = &_head_sum[static_cast<size_t>(f) * 5];
+        hsum[0] += a0;
+        hsum[1] += a1;
+        hsum[2] += a2;
+        hsum[3] += a3;
+        hsum[4] += a4;
+      }
+      // layer1x1 residual.
       float* lin = &_layer_in[static_cast<size_t>(f) * 5];
       lin[0] += lb0 + lw00 * a0 + lw10 * a1 + lw20 * a2 + lw30 * a3 + lw40 * a4;
       lin[1] += lb1 + lw01 * a0 + lw11 * a1 + lw21 * a2 + lw31 * a3 + lw41 * a4;
@@ -2641,7 +2687,7 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       }
     }
 
-    // Final tap + mixin + FiLM + LeakyReLU + l1x1 residual (no head_sum accumulation).
+    // Final tap + mixin + FiLM + LeakyReLU + [head_sum accumulate] + l1x1 residual.
     const float* wk_last = &L.conv_w[static_cast<size_t>(K - 1) * 36];
     const int tap_base_last = tap_base_phys(0);
     const float cw0 = wk_last[0], cw1 = wk_last[1], cw2 = wk_last[2], cw3 = wk_last[3], cw4 = wk_last[4], cw5 = wk_last[5];
@@ -2691,7 +2737,21 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       a3 = (a3 >= 0.0f) ? a3 : a3 * kLeakySlope;
       a4 = (a4 >= 0.0f) ? a4 : a4 * kLeakySlope;
       a5 = (a5 >= 0.0f) ? a5 : a5 * kLeakySlope;
-      // layer1x1 residual (no head_sum accumulation — parametric uses final layer output).
+      // [Fork] Skip connections: accumulate this layer's post-activation into the
+      // head sum (same site the static A2FastModel uses -- after FiLM+LeakyReLU, BEFORE the
+      // l1x1 residual). Compiled away entirely when !SkipHead, so residual models are
+      // byte-for-byte the same code as before.
+      if constexpr (SkipHead)
+      {
+        float* __restrict__ hsum = &_head_sum[static_cast<size_t>(f) * 6];
+        hsum[0] += a0;
+        hsum[1] += a1;
+        hsum[2] += a2;
+        hsum[3] += a3;
+        hsum[4] += a4;
+        hsum[5] += a5;
+      }
+      // layer1x1 residual.
       float* lin = &_layer_in[static_cast<size_t>(f) * 6];
       lin[0] += lb0 + lw00 * a0 + lw10 * a1 + lw20 * a2 + lw30 * a3 + lw40 * a4 + lw50 * a5;
       lin[1] += lb1 + lw01 * a0 + lw11 * a1 + lw21 * a2 + lw31 * a3 + lw41 * a4 + lw51 * a5;
@@ -2762,7 +2822,7 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       }
     }
 
-    // Final tap + mixin + FiLM + LeakyReLU + l1x1 residual (no head_sum accumulation).
+    // Final tap + mixin + FiLM + LeakyReLU + [head_sum accumulate] + l1x1 residual.
     const float* wk_last = &L.conv_w[static_cast<size_t>(K - 1) * 49];
     const int tap_base_last = tap_base_phys(0);
     const float cw0 = wk_last[0], cw1 = wk_last[1], cw2 = wk_last[2], cw3 = wk_last[3], cw4 = wk_last[4], cw5 = wk_last[5], cw6 = wk_last[6];
@@ -2818,7 +2878,22 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       a4 = (a4 >= 0.0f) ? a4 : a4 * kLeakySlope;
       a5 = (a5 >= 0.0f) ? a5 : a5 * kLeakySlope;
       a6 = (a6 >= 0.0f) ? a6 : a6 * kLeakySlope;
-      // layer1x1 residual (no head_sum accumulation — parametric uses final layer output).
+      // [Fork] Skip connections: accumulate this layer's post-activation into the
+      // head sum (same site the static A2FastModel uses -- after FiLM+LeakyReLU, BEFORE the
+      // l1x1 residual). Compiled away entirely when !SkipHead, so residual models are
+      // byte-for-byte the same code as before.
+      if constexpr (SkipHead)
+      {
+        float* __restrict__ hsum = &_head_sum[static_cast<size_t>(f) * 7];
+        hsum[0] += a0;
+        hsum[1] += a1;
+        hsum[2] += a2;
+        hsum[3] += a3;
+        hsum[4] += a4;
+        hsum[5] += a5;
+        hsum[6] += a6;
+      }
+      // layer1x1 residual.
       float* lin = &_layer_in[static_cast<size_t>(f) * 7];
       lin[0] += lb0 + lw00 * a0 + lw10 * a1 + lw20 * a2 + lw30 * a3 + lw40 * a4 + lw50 * a5 + lw60 * a6;
       lin[1] += lb1 + lw01 * a0 + lw11 * a1 + lw21 * a2 + lw31 * a3 + lw41 * a4 + lw51 * a5 + lw61 * a6;
@@ -2895,7 +2970,7 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       }
     }
 
-    // Final tap + mixin + FiLM + LeakyReLU + l1x1 residual (no head_sum accumulation).
+    // Final tap + mixin + FiLM + LeakyReLU + [head_sum accumulate] + l1x1 residual.
     const float* wk_last = &L.conv_w[static_cast<size_t>(K - 1) * 64];
     const int tap_base_last = tap_base_phys(0);
     const float cw0 = wk_last[0], cw1 = wk_last[1], cw2 = wk_last[2], cw3 = wk_last[3], cw4 = wk_last[4], cw5 = wk_last[5], cw6 = wk_last[6], cw7 = wk_last[7];
@@ -2957,7 +3032,23 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       a5 = (a5 >= 0.0f) ? a5 : a5 * kLeakySlope;
       a6 = (a6 >= 0.0f) ? a6 : a6 * kLeakySlope;
       a7 = (a7 >= 0.0f) ? a7 : a7 * kLeakySlope;
-      // layer1x1 residual (no head_sum accumulation — parametric uses final layer output).
+      // [Fork] Skip connections: accumulate this layer's post-activation into the
+      // head sum (same site the static A2FastModel uses -- after FiLM+LeakyReLU, BEFORE the
+      // l1x1 residual). Compiled away entirely when !SkipHead, so residual models are
+      // byte-for-byte the same code as before.
+      if constexpr (SkipHead)
+      {
+        float* __restrict__ hsum = &_head_sum[static_cast<size_t>(f) * 8];
+        hsum[0] += a0;
+        hsum[1] += a1;
+        hsum[2] += a2;
+        hsum[3] += a3;
+        hsum[4] += a4;
+        hsum[5] += a5;
+        hsum[6] += a6;
+        hsum[7] += a7;
+      }
+      // layer1x1 residual.
       float* lin = &_layer_in[static_cast<size_t>(f) * 8];
       lin[0] += lb0 + lw00 * a0 + lw10 * a1 + lw20 * a2 + lw30 * a3 + lw40 * a4 + lw50 * a5 + lw60 * a6 + lw70 * a7;
       lin[1] += lb1 + lw01 * a0 + lw11 * a1 + lw21 * a2 + lw31 * a3 + lw41 * a4 + lw51 * a5 + lw61 * a6 + lw71 * a7;
@@ -3009,14 +3100,20 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
     ztile.colwise() += beta_vec;
     // LeakyReLU.
     ztile = (ztile.array() < 0.0f).select(ztile.array() * kLeakySlope, ztile.array());
-    // layer1x1 residual (no skip-connection accumulation).
+    // [Fork] Skip connections: accumulate post-activation into the head sum.
+    if constexpr (SkipHead)
+    {
+      Eigen::Map<MatCDyn, Eigen::Aligned16> hsum_block(_head_sum.data(), Channels, num_frames);
+      hsum_block.noalias() += ztile;
+    }
+    // layer1x1 residual.
     lin_block.noalias() += l1x1_mat * ztile;
     lin_block.colwise() += l1x1_b_vec;
   }
 }
 
-template <int Channels>
-void ParametricA2FastModel<Channels>::_layer_forward(int li, const float* cond, int num_frames)
+template <int Channels, bool SkipHead>
+void ParametricA2FastModel<Channels, SkipHead>::_layer_forward(int li, const float* cond, int num_frames)
 {
   Layer& L = _layers[li];
   _ring_write(L, num_frames);
@@ -3030,8 +3127,8 @@ void ParametricA2FastModel<Channels>::_layer_forward(int li, const float* cond, 
 }
 
 // --- Head (identical to A2FastModel) ---
-template <int Channels>
-void ParametricA2FastModel<Channels>::_head_forward(float* output, int num_frames)
+template <int Channels, bool SkipHead>
+void ParametricA2FastModel<Channels, SkipHead>::_head_forward(float* output, int num_frames)
 {
   _head_ring_write(num_frames);
   #if NAM_A2_RING_MODE == 1
@@ -3058,8 +3155,8 @@ void ParametricA2FastModel<Channels>::_head_forward(float* output, int num_frame
 }
 
 // --- process ---
-template <int Channels>
-void ParametricA2FastModel<Channels>::process(NAM_SAMPLE** input, NAM_SAMPLE** output, int num_frames)
+template <int Channels, bool SkipHead>
+void ParametricA2FastModel<Channels, SkipHead>::process(NAM_SAMPLE** input, NAM_SAMPLE** output, int num_frames)
 {
   if (num_frames > GetMaxBufferSize())
     SetMaxBufferSize(num_frames);
@@ -3081,11 +3178,16 @@ void ParametricA2FastModel<Channels>::process(NAM_SAMPLE** input, NAM_SAMPLE** o
       lin[c] = _rechannel_w[c] * x;
   }
 
-  // Run all 23 layers. After this, _layer_in holds the final layer's l1x1+residual output.
+  // [Fork] Zero the skip accumulator for this buffer (skip models only).
+  if constexpr (SkipHead)
+    std::memset(_head_sum.data(), 0, static_cast<size_t>(num_frames) * Channels * sizeof(float));
+
+  // Run all 23 layers. Afterwards _layer_in holds the final layer's l1x1+residual output and,
+  // for skip models, _head_sum holds the sum of every layer's post-activation.
   for (int li = 0; li < kNumLayers; li++)
     _layer_forward(li, cond, num_frames);
 
-  // Head: reads from _layer_in via _head_ring_write (called inside _head_forward).
+  // Head: reads _head_sum (skip) or _layer_in (residual) via _head_ring_write.
   float* head_out = _head_out.data();
   _head_forward(head_out, num_frames);
 
@@ -3111,28 +3213,36 @@ struct ParametricA2FastConfig : public ModelConfig
 {
   int channels = 0;
   int num_params = 0;
+  // [Fork] Which head the model was trained with. SkipHead is a template parameter of
+  // ParametricA2FastModel, so each width has a skip and a residual instantiation; the
+  // accumulate is compiled out of the residual one entirely.
+  bool skip_head = false;
   std::vector<ParametricParam> param_defs;
+
+  template <int C>
+  std::unique_ptr<DSP> _make(std::vector<float>&& weights, double sampleRate)
+  {
+    if (skip_head)
+      return std::make_unique<ParametricA2FastModel<C, true>>(std::move(weights), sampleRate,
+                                                              num_params, param_defs);
+    return std::make_unique<ParametricA2FastModel<C, false>>(std::move(weights), sampleRate,
+                                                             num_params, param_defs);
+  }
 
   std::unique_ptr<DSP> create(std::vector<float> weights, double sampleRate) override
   {
     if (channels == 3)
-      return std::make_unique<ParametricA2FastModel<3>>(std::move(weights), sampleRate, num_params,
-                                                        param_defs);
+      return _make<3>(std::move(weights), sampleRate);
     if (channels == 4) // [Fork] BEGIN: intermediate widths
-      return std::make_unique<ParametricA2FastModel<4>>(std::move(weights), sampleRate, num_params,
-                                                        param_defs);
+      return _make<4>(std::move(weights), sampleRate);
     if (channels == 5)
-      return std::make_unique<ParametricA2FastModel<5>>(std::move(weights), sampleRate, num_params,
-                                                        param_defs);
+      return _make<5>(std::move(weights), sampleRate);
     if (channels == 6)
-      return std::make_unique<ParametricA2FastModel<6>>(std::move(weights), sampleRate, num_params,
-                                                        param_defs);
+      return _make<6>(std::move(weights), sampleRate);
     if (channels == 7) // [Fork] END
-      return std::make_unique<ParametricA2FastModel<7>>(std::move(weights), sampleRate, num_params,
-                                                        param_defs);
+      return _make<7>(std::move(weights), sampleRate);
     if (channels == 8)
-      return std::make_unique<ParametricA2FastModel<8>>(std::move(weights), sampleRate, num_params,
-                                                        param_defs);
+      return _make<8>(std::move(weights), sampleRate);
     throw std::runtime_error("ParametricA2FastConfig: unsupported channel count "
                              + std::to_string(channels));
   }
@@ -3345,9 +3455,14 @@ std::unique_ptr<ModelConfig> create_parametric_a2_fast_config(const nlohmann::js
     }
   }
 
+  // [Fork] head_mode decides which fast-path instantiation we build. read_head_mode()
+  // is the shared reader (also used by the generic path): it validates schema_version and
+  // throws on anything newer/unknown rather than guessing a head, which would silently
+  // produce wrong audio.
   auto out = std::make_unique<ParametricA2FastConfig>();
   out->channels   = ch;
   out->num_params = np;
+  out->skip_head  = (read_head_mode(config) == ParametricHeadMode::Skip);
   out->param_defs = std::move(param_defs);
   return out;
 }

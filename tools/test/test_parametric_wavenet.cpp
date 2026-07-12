@@ -199,14 +199,18 @@ void test_head_mode_skip_accumulates_skip_connections()
   assert(generic_uses_final_layer_head(make_tagged_cfg(3, "skip")) == false);
 }
 
-void test_skip_model_avoids_residual_fast_path()
+void test_skip_model_takes_fast_path()
 {
-  // THE safety test. The a2_fast parametric fast path is residual-only (its head reads the
-  // final residual; it has no _head_sum). Routing a skip model through it would silently
-  // produce wrong audio, so a skip model must fall through to the generic path instead.
+  // Since migration 5b the fast path serves BOTH heads (ParametricA2FastModel is templated
+  // on <Channels, SkipHead>), so a skip model keeps the ~17x fast path rather than falling
+  // back to the generic Eigen reference. Its numerical correctness is proven separately, per
+  // width, by test_a2_fast::test_parametric_skip_matches_generic_*.
   auto config = nam::wavenet::create_parametric_config(make_tagged_cfg(3, "skip"), 48000.0);
   assert(config != nullptr);
-  assert(dynamic_cast<nam::wavenet::ParametricWaveNetConfig*>(config.get()) != nullptr);
+#if defined(NAM_ENABLE_A2_FAST)
+  assert(dynamic_cast<nam::wavenet::ParametricWaveNetConfig*>(config.get()) == nullptr);
+#endif
+  // The generic path still honors the tag (it is the reference the fast path is checked against).
   assert(generic_uses_final_layer_head(make_tagged_cfg(3, "skip")) == false);
 }
 
