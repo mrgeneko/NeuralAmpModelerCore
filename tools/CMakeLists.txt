@@ -19,6 +19,7 @@ include_directories(tools ${AUDIO_DSP_TOOLS_DIR}/dsp)
 add_executable(loadmodel loadmodel.cpp ${NAM_SOURCES})
 add_executable(benchmodel benchmodel.cpp ${NAM_SOURCES})
 add_executable(render render.cpp ${NAM_SOURCES} ${AUDIO_DSP_TOOLS_WAV_SOURCES})
+add_executable(render_parametric render_parametric.cpp ${NAM_SOURCES} ${AUDIO_DSP_TOOLS_WAV_SOURCES})
 target_compile_features(render PUBLIC cxx_std_20)
 # AudioDSPTools wav.cpp has sign-compare issues; don't fail build
 set_source_files_properties(${AUDIO_DSP_TOOLS_WAV_SOURCES} PROPERTIES COMPILE_FLAGS "-Wno-error")
