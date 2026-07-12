@@ -394,4 +394,69 @@ void test_get_dsp_with_returned_config_constructs_once()
   assert(gConstructorResetConstructCount == 1);
   assert(returned_config.architecture == kConstructorResetArchitecture);
 }
+
+// --- [Fork] dual-payload .nam: prefer the embedded parametric model -------
+//
+// A dual .nam carries a stock-legible baked static model at the top level PLUS the full
+// parametric model under "embedded_parametric". Stock plugins read the top level; we
+// must prefer the embedded one so the user gets live knobs.
+//
+// The top-level architecture below is deliberately BOGUS: these tests only pass if the
+// loader genuinely ignores it and reads the embedded payload.
+nlohmann::json _MakeDualPayload()
+{
+  nlohmann::json embedded = nlohmann::json::parse(basicConfigStr); // a valid, loadable model
+
+  nlohmann::json dual;
+  dual["version"] = embedded["version"];
+  dual["architecture"] = "BogusTopLevelArchitecture"; // would throw if we read it
+  dual["config"] = nlohmann::json::object();
+  dual["weights"] = std::vector<float>{};
+  dual["metadata"] = nlohmann::json::object();
+  dual["sample_rate"] = 48000;
+  dual["embedded_parametric"] = embedded;
+  return dual;
+}
+
+void test_dual_payload_prefers_embedded_model()
+{
+  nam::dspData returned;
+  std::unique_ptr<nam::DSP> dsp = nam::get_dsp(_MakeDualPayload(), returned);
+  assert(dsp != nullptr);
+  // The embedded model won; the bogus top level was ignored entirely.
+  assert(returned.architecture == "LSTM");
+  // Metadata comes from the embedded model (its gain/loudness are the ones that apply),
+  // not from the top-level baked view.
+  assert(!returned.metadata.is_null());
+  assert(returned.metadata.contains("loudness"));
+}
+
+void test_dual_payload_without_embed_reads_top_level()
+{
+  // Regression: a plain (non-dual) .nam still loads from the top level as before.
+  nlohmann::json plain = nlohmann::json::parse(basicConfigStr);
+  nam::dspData returned;
+  std::unique_ptr<nam::DSP> dsp = nam::get_dsp(plain, returned);
+  assert(dsp != nullptr);
+  assert(returned.architecture == "LSTM");
+}
+
+void test_bogus_top_level_without_embed_throws()
+{
+  // Proves the dual test above is meaningful: the same bogus top level, WITHOUT the
+  // embedded payload, does fail. So the pass above came from the redirect, not luck.
+  nlohmann::json dual = _MakeDualPayload();
+  dual.erase("embedded_parametric");
+  bool threw = false;
+  try
+  {
+    nam::dspData returned;
+    std::unique_ptr<nam::DSP> dsp = nam::get_dsp(dual, returned);
+  }
+  catch (const std::exception&)
+  {
+    threw = true;
+  }
+  assert(threw);
+}
 }; // namespace test_get_dsp

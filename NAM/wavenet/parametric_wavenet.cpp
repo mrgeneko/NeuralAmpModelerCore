@@ -124,6 +124,53 @@ std::unique_ptr<DSP> ParametricWaveNetConfig::create(std::vector<float> weights,
 
 // Config parser ===============================================================
 
+// [Fork] BEGIN: parametric schema + head-mode tagging
+//
+// A parametric .nam self-describes, in config["parametric"]:
+//   "schema_version" : version of OUR parametric block. Deliberately SEPARATE from the
+//                      .nam's top-level "version" (0.7.0), which is NAM's FILE-FORMAT
+//                      version and is validated against 0.5.0-0.7.0 -- bumping that for
+//                      our own extensions would make loaders reject the file.
+//   "head_mode"      : "skip"     -> head reads the SUM of every layer's post-activation
+//                                    (NAM standard / stock plugins / static a2_fast).
+//                      "residual" -> head reads the FINAL layer's residual output
+//                                    (the original Fork parametric convention).
+//
+// Both keys are absent in pre-tagging files, which are residual by definition.
+// Running a model under the wrong head produces WRONG AUDIO with no error, so we never
+// guess: an unknown (newer) schema is a hard load failure.
+constexpr int kMaxParametricSchemaVersion = 1;
+
+enum class ParametricHeadMode
+{
+  Residual,
+  Skip
+};
+
+ParametricHeadMode read_head_mode(const nlohmann::json& config)
+{
+  const auto& par = config.at("parametric");
+
+  const int schema = par.value("schema_version", 0);
+  if (schema > kMaxParametricSchemaVersion)
+  {
+    std::ostringstream ss;
+    ss << "ParametricWaveNet: parametric schema_version " << schema
+       << " is newer than this build supports (max " << kMaxParametricSchemaVersion
+       << "). Update Fork -- loading it anyway would silently produce wrong audio.";
+    throw std::runtime_error(ss.str());
+  }
+
+  const std::string mode = par.value("head_mode", std::string("residual"));
+  if (mode == "residual")
+    return ParametricHeadMode::Residual;
+  if (mode == "skip")
+    return ParametricHeadMode::Skip;
+  throw std::runtime_error("ParametricWaveNet: unknown head_mode '" + mode
+                           + "' (expected \"skip\" or \"residual\")");
+}
+// [Fork] END: parametric schema + head-mode tagging
+
 // [Fork] BEGIN: generic construction factored out of create_parametric_config so
 // tests can build the reference (non-fast-path) model directly, independent of whether
 // NAM_ENABLE_A2_FAST is defined -- mirrors how the non-parametric a2_fast tests call
@@ -158,6 +205,10 @@ std::unique_ptr<ModelConfig> create_parametric_config_generic(const nlohmann::js
   if (!config.contains("parametric"))
     throw std::runtime_error("ParametricWaveNet: missing 'parametric' block");
   const auto& param_block = config["parametric"];
+
+  // [Fork] Which head this model was TRAINED with. Validates schema_version and
+  // throws on anything newer than we understand rather than guessing.
+  const ParametricHeadMode head_mode = read_head_mode(config);
 
   if (!param_block.contains("condition_size"))
     throw std::runtime_error("ParametricWaveNet: parametric block missing 'condition_size'");
@@ -238,7 +289,13 @@ std::unique_ptr<ModelConfig> create_parametric_config_generic(const nlohmann::js
     off,                   // layer1x1_post_film
     off,                   // head1x1_post_film
     /*film_condition_size=*/ num_params,            // knob count; sets FiLM condition_dim
-    /*use_final_layer_output_for_head=*/ true);    // Python ParametricA2 has no skip connections
+    // [Fork] Head input follows the model's declared head_mode:
+    //   Residual -> true : head reads the final layer's l1x1+residual output.
+    //   Skip     -> false: head reads the SUM of every layer's post-activation (the
+    //                      standard WaveNet skip connections; what stock NAM plugins,
+    //                      nam_wavenet.metal and the static a2_fast path all compute).
+    // Legacy (untagged) files are Residual, so they keep behaving exactly as before.
+    /*use_final_layer_output_for_head=*/ head_mode == ParametricHeadMode::Residual);
 
   auto pc = std::make_unique<ParametricWaveNetConfig>();
   pc->in_channels = 1;
@@ -261,8 +318,20 @@ std::unique_ptr<ModelConfig> create_parametric_config(const nlohmann::json& conf
   // topology-agnostic -- nothing in it depends on a specific width).
 #if defined(NAM_ENABLE_A2_FAST)
   {
+    // [Fork] The fast path is RESIDUAL-ONLY: ParametricA2FastModel's head reads the
+    // final layer residual and it has no skip accumulator. Routing a SKIP-trained model
+    // through it would silently produce wrong audio, so gate on the declared head_mode.
+    // Skip models fall through to the generic Eigen path below -- numerically correct, but
+    // ~17x slower. Removing that penalty means porting _head_sum accumulation into the
+    // per-width kernels (the static A2FastModel already does exactly this); tracked as
+    // spice-to-nam docs/rearchitecture_skip_accumulation.md section 5b.
+    // An untagged (legacy) file has no "parametric" block only if it is malformed -- in
+    // that case fall through so the generic path raises the proper error.
+    const bool residual_head = !config.contains("parametric")
+                               || read_head_mode(config) == ParametricHeadMode::Residual;
+
     int fast_channels = 0, fast_num_params = 0;
-    if (a2_fast::is_parametric_a2_shape(config, &fast_channels, &fast_num_params))
+    if (residual_head && a2_fast::is_parametric_a2_shape(config, &fast_channels, &fast_num_params))
       return a2_fast::create_parametric_a2_fast_config(config, sampleRate);
   }
 #endif

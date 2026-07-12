@@ -9,11 +9,20 @@
 // 8 (standard) route through a hand-optimized fast path (a2_fast.h, ~17x faster on
 // Apple Silicon); any other width (e.g. a new intermediate size) falls back to the
 // generic Eigen-based construction here, which is topology-agnostic with respect to
-// channel count. Two structural differences from a standard A2 model:
+// channel count. Structural differences from a standard A2 model:
 //   1. Each layer has an active activation_pre_film FiLM module conditioned on knobs.
-//   2. No per-layer skip connections: the head receives the FINAL layer's l1x1+residual
-//      output directly (use_final_layer_output_for_head=true). Standard WaveNet accumulates
-//      skip connections from all layers; Python ParametricA2 does not.
+//   2. The head input depends on the model's declared config["parametric"]["head_mode"]:
+//        "skip"     - head reads the SUM of every layer's post-activation, i.e. the
+//                     standard WaveNet skip connections (what stock NAM plugins,
+//                     nam_wavenet.metal and the static a2_fast path all compute).
+//        "residual" - head reads the FINAL layer's l1x1+residual output directly
+//                     (use_final_layer_output_for_head=true). This is the original
+//                     Fork parametric convention and the default for untagged
+//                     (pre-tagging) files.
+//      Running a model under the wrong head silently produces WRONG AUDIO, so head_mode
+//      is honored on load and an unknown parametric "schema_version" is a hard failure.
+//      NOTE: the a2_fast parametric fast path is currently RESIDUAL-ONLY, so skip models
+//      are routed to the generic path until its kernels accumulate _head_sum.
 //
 // Per-layer computation:
 //   audio → rechannel(1→C) → dilated_conv(C→C) ──┐

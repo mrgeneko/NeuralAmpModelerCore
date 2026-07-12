@@ -151,6 +151,110 @@ void test_config_parse_valid_json()
 #endif
 }
 
+// --- [Fork] head_mode + schema_version tagging ---------------------------
+//
+// A parametric .nam declares which head it was TRAINED with. Running it under the wrong
+// head silently produces WRONG AUDIO, so these tests pin the contract:
+//   - untagged (legacy) => residual
+//   - "skip"            => skip-accumulating head (use_final_layer_output_for_head=false)
+//   - a SKIP model must NOT be routed to the residual-only fast path
+//   - unknown head_mode / newer schema_version => hard failure, never a guess
+
+static nlohmann::json make_tagged_cfg(int channels, const char* head_mode, int schema = -1)
+{
+  nlohmann::json cfg;
+  cfg["layers"] = channels;
+  cfg["head_scale"] = 1.0f;
+  cfg["parametric"]["condition_size"] = 2;
+  if (head_mode != nullptr)
+    cfg["parametric"]["head_mode"] = head_mode;
+  if (schema >= 0)
+    cfg["parametric"]["schema_version"] = schema;
+  return cfg;
+}
+
+// Reads the head flag off the GENERIC config (the fast path has no such field).
+static bool generic_uses_final_layer_head(const nlohmann::json& cfg)
+{
+  auto config = nam::wavenet::create_parametric_config_generic(cfg, 48000.0);
+  auto* pwn = dynamic_cast<nam::wavenet::ParametricWaveNetConfig*>(config.get());
+  assert(pwn != nullptr);
+  assert(pwn->layer_array_params.size() == 1);
+  return pwn->layer_array_params[0].use_final_layer_output_for_head;
+}
+
+void test_head_mode_absent_defaults_to_residual()
+{
+  // Pre-tagging files have no head_mode and are residual by definition.
+  assert(generic_uses_final_layer_head(make_tagged_cfg(3, nullptr)) == true);
+}
+
+void test_head_mode_residual_reads_final_layer()
+{
+  assert(generic_uses_final_layer_head(make_tagged_cfg(3, "residual")) == true);
+}
+
+void test_head_mode_skip_accumulates_skip_connections()
+{
+  assert(generic_uses_final_layer_head(make_tagged_cfg(3, "skip")) == false);
+}
+
+void test_skip_model_avoids_residual_fast_path()
+{
+  // THE safety test. The a2_fast parametric fast path is residual-only (its head reads the
+  // final residual; it has no _head_sum). Routing a skip model through it would silently
+  // produce wrong audio, so a skip model must fall through to the generic path instead.
+  auto config = nam::wavenet::create_parametric_config(make_tagged_cfg(3, "skip"), 48000.0);
+  assert(config != nullptr);
+  assert(dynamic_cast<nam::wavenet::ParametricWaveNetConfig*>(config.get()) != nullptr);
+  assert(generic_uses_final_layer_head(make_tagged_cfg(3, "skip")) == false);
+}
+
+void test_residual_model_still_takes_fast_path()
+{
+  // Residual models keep the ~17x fast path (no regression for shipped models).
+  auto config = nam::wavenet::create_parametric_config(make_tagged_cfg(3, "residual"), 48000.0);
+  assert(config != nullptr);
+#if defined(NAM_ENABLE_A2_FAST)
+  assert(dynamic_cast<nam::wavenet::ParametricWaveNetConfig*>(config.get()) == nullptr);
+#endif
+}
+
+void test_unknown_head_mode_throws()
+{
+  bool threw = false;
+  try
+  {
+    nam::wavenet::create_parametric_config(make_tagged_cfg(3, "bogus"), 48000.0);
+  }
+  catch (const std::runtime_error&)
+  {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void test_newer_schema_version_throws()
+{
+  // A file from a future build must fail loudly rather than be silently misread.
+  bool threw = false;
+  try
+  {
+    nam::wavenet::create_parametric_config(make_tagged_cfg(3, "skip", 999), 48000.0);
+  }
+  catch (const std::runtime_error&)
+  {
+    threw = true;
+  }
+  assert(threw);
+}
+
+void test_known_schema_version_accepted()
+{
+  auto config = nam::wavenet::create_parametric_config(make_tagged_cfg(3, "skip", 1), 48000.0);
+  assert(config != nullptr);
+}
+
 void test_config_parse_missing_layers_throws()
 {
   nlohmann::json cfg;

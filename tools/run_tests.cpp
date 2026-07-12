@@ -377,6 +377,17 @@ int main()
 #endif
 
   // ParametricWaveNet: config parsing, construction, processing, SetKnobValues, registry, factory
+  test_parametric_wavenet::test_head_mode_absent_defaults_to_residual();
+  test_parametric_wavenet::test_head_mode_residual_reads_final_layer();
+  test_parametric_wavenet::test_head_mode_skip_accumulates_skip_connections();
+  test_parametric_wavenet::test_skip_model_avoids_residual_fast_path();
+  test_parametric_wavenet::test_residual_model_still_takes_fast_path();
+  test_parametric_wavenet::test_unknown_head_mode_throws();
+  test_parametric_wavenet::test_newer_schema_version_throws();
+  test_parametric_wavenet::test_known_schema_version_accepted();
+  test_get_dsp::test_dual_payload_prefers_embedded_model();
+  test_get_dsp::test_dual_payload_without_embed_reads_top_level();
+  test_get_dsp::test_bogus_top_level_without_embed_throws();
   test_parametric_wavenet::test_config_parse_valid_json();
   test_parametric_wavenet::test_config_parse_missing_layers_throws();
   test_parametric_wavenet::test_config_parse_invalid_channel_count_throws();

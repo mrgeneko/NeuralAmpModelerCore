@@ -141,17 +141,38 @@ std::vector<float> GetWeights(nlohmann::json const& j)
 
 void populate_dsp_data(const nlohmann::json& config, dspData& returnedConfig)
 {
-  verify_config_version(config["version"].get<std::string>());
+  // [Fork] Dual-payload .nam support.
+  //
+  // A dual .nam carries BOTH a stock-legible baked static model at the top level AND the
+  // full parametric model under "embedded_parametric":
+  //
+  //   { "architecture": "WaveNet",   <- a baked snapshot; stock NAM plugins read this and
+  //     "config": {...},                play a fixed tone (they ignore unknown keys)
+  //     "weights": [...],
+  //     "embedded_parametric": {   <- the real parametric model; we prefer THIS so the
+  //       "architecture": "ParametricWaveNet", ...  user gets live knobs
+  //     } }
+  //
+  // The embedded object is a complete, self-contained .param.nam, so preferring it is
+  // exactly equivalent to loading that file standalone -- no parser or registry changes,
+  // and SlimmableContainer submodels work unchanged. Its own metadata (gain/loudness) is
+  // the one that applies; the top-level baked metadata describes a tone we aren't playing.
+  const nlohmann::json* src = &config;
+  const auto embedded = config.find("embedded_parametric");
+  if (embedded != config.end() && embedded->is_object())
+    src = &(*embedded);
 
-  nlohmann::json config_json = config["config"];
-  std::vector<float> weights = GetWeights(config);
+  verify_config_version((*src)["version"].get<std::string>());
 
-  returnedConfig.version = config["version"].get<std::string>();
-  returnedConfig.architecture = config["architecture"].get<std::string>();
+  nlohmann::json config_json = (*src)["config"];
+  std::vector<float> weights = GetWeights(*src);
+
+  returnedConfig.version = (*src)["version"].get<std::string>();
+  returnedConfig.architecture = (*src)["architecture"].get<std::string>();
   returnedConfig.config = config_json;
-  returnedConfig.metadata = config.value("metadata", nlohmann::json());
+  returnedConfig.metadata = src->value("metadata", nlohmann::json());
   returnedConfig.weights = weights;
-  returnedConfig.expected_sample_rate = nam::get_sample_rate_from_nam_file(config);
+  returnedConfig.expected_sample_rate = nam::get_sample_rate_from_nam_file(*src);
 }
 
 std::unique_ptr<DSP> get_dsp(const std::filesystem::path config_filename, DspLoadOptions options)
