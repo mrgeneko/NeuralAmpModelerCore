@@ -82,7 +82,7 @@ void ContainerModel::Reset(const double sampleRate, const int maxBufferSize)
   _submodels[active_index].model->Reset(sampleRate, maxBufferSize);
 }
 
-void ContainerModel::SetSlimmableSize(const double val)
+size_t ContainerModel::_index_for_ratio(const double val) const
 {
   size_t active_index = _submodels.size() - 1;
   for (size_t i = 0; i < _submodels.size(); ++i)
@@ -93,6 +93,12 @@ void ContainerModel::SetSlimmableSize(const double val)
       break;
     }
   }
+  return active_index;
+}
+
+void ContainerModel::SetSlimmableSize(const double val)
+{
+  size_t active_index = _index_for_ratio(val);
 
   // Fast path: no change to active model.
   if (active_index == _active_index.load(std::memory_order_acquire))
@@ -107,13 +113,41 @@ void ContainerModel::SetSlimmableSize(const double val)
   {
     return;
   }
-  // Setting _active_index puts the model in the RT path, so reset before doing that.
-  const double sr = mHaveExternalSampleRate ? mExternalSampleRate : mExpectedSampleRate;
-  _submodels[active_index].model->Reset(sr, GetMaxBufferSize());
+
+  // [Fork] BEGIN: PrewarmForRatio() staging
+  // If a background PrewarmForRatio(val) call already Reset()+prewarmed this exact
+  // submodel, skip the redundant (and potentially real-time-deadline-busting) Reset()
+  // here -- this call then reduces to a cheap atomic index flip. Otherwise fall back
+  // to the original synchronous behavior (safe, just not real-time-safe, matching this
+  // method's documented contract).
+  if (_prewarmed_index.load(std::memory_order_acquire) != (int)active_index)
+  {
+    const double sr = mHaveExternalSampleRate ? mExternalSampleRate : mExpectedSampleRate;
+    _submodels[active_index].model->Reset(sr, GetMaxBufferSize());
+  }
+  _prewarmed_index.store(-1, std::memory_order_relaxed);
+  // [Fork] END
 
   // Finally set when we're ready:
   _active_index.store(active_index, std::memory_order_release);
 }
+
+// [Fork] BEGIN: PrewarmForRatio()
+void ContainerModel::PrewarmForRatio(const double val)
+{
+  size_t target_index = _index_for_ratio(val);
+
+  std::lock_guard<std::mutex> lock(_slim_set_mutex);
+  if (target_index == _active_index.load(std::memory_order_acquire))
+  {
+    return; // already active; nothing to stage
+  }
+
+  const double sr = mHaveExternalSampleRate ? mExternalSampleRate : mExpectedSampleRate;
+  _submodels[target_index].model->Reset(sr, GetMaxBufferSize());
+  _prewarmed_index.store((int)target_index, std::memory_order_release);
+}
+// [Fork] END
 
 int ContainerModel::GetPrewarmSamples()
 {

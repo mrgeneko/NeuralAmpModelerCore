@@ -44,6 +44,7 @@ public:
   void Reset(const double sampleRate, const int maxBufferSize) override;
   void SetPrewarmOnReset(const bool prewarmOnReset) override;
   void SetSlimmableSize(const double val) override;
+  void PrewarmForRatio(const double val) override; // [Fork]
   std::vector<int> GetAllowedSizes() const override; // [Fork]
   int GetPrewarmSamples() override;
 
@@ -56,6 +57,14 @@ public:
   std::vector<DSPParamDef> GetParameterDefs() const override;
 
 private:
+  // [Fork] BEGIN: PrewarmForRatio() staging
+  /// Index computation shared by SetSlimmableSize() and PrewarmForRatio().
+  size_t _index_for_ratio(const double val) const;
+  /// Index most recently Reset()+prewarmed by PrewarmForRatio(), or -1 if none is
+  /// staged / the staged one was already consumed by SetActiveIndex.
+  std::atomic<int> _prewarmed_index{-1};
+  // [Fork] END
+
   std::vector<Submodel> _submodels;
   std::atomic<size_t> _active_index{0};
   std::mutex _slim_set_mutex;

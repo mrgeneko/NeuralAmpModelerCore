@@ -22,6 +22,20 @@ public:
   /// Not real-time safe
   virtual void SetSlimmableSize(const double val) = 0;
 
+  // [Fork] BEGIN: PrewarmForRatio()
+  /// \brief Prepare (Reset()+prewarm) the submodel that SetSlimmableSize(val) would
+  /// activate, WITHOUT activating it.
+  ///
+  /// Call this from a background thread before calling SetSlimmableSize(val) with the
+  /// same value on the render thread: implementations that support staging make the
+  /// subsequent SetSlimmableSize(val) cheap (a pointer/index flip) instead of doing the
+  /// expensive Reset()+prewarm() work inline. Default is a no-op for implementations
+  /// that don't need it (e.g. already-cheap size changes).
+  ///
+  /// Thread-safe. Not real-time safe (this is the method meant to absorb that cost).
+  virtual void PrewarmForRatio(const double val) {}
+  // [Fork] END: PrewarmForRatio()
+
   // [Fork] BEGIN: GetAllowedSizes()
   /// \brief The discrete sizes a caller may select between, sorted ascending
   ///

@@ -317,6 +317,11 @@ int main()
   test_container::test_container_reset_only_resets_active_submodel();
   test_container::test_container_switch_resets_before_activation();
   test_container::test_container_get_allowed_sizes_reads_array_layers_shape();
+  test_container::test_container_prewarm_for_ratio_resets_without_activating();
+  test_container::test_container_set_slimmable_size_after_prewarm_skips_redundant_reset();
+  test_container::test_container_set_slimmable_size_without_prewarm_still_resets();
+  test_container::test_container_prewarm_for_ratio_already_active_is_noop();
+  test_container::test_container_prewarm_for_ratio_stale_stage_falls_back_to_reset();
 
   // Render --slim tests
   test_render_slim::test_slim_changes_output();

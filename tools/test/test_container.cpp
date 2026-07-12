@@ -434,6 +434,109 @@ void test_container_switch_resets_before_activation()
   assert(process_one_sample(dsp.get()) == small->process_value);
 }
 
+// PrewarmForRatio() lets a caller (e.g. a background thread) pay the Reset()+prewarm()
+// cost for a not-yet-active submodel ahead of time, so the later SetSlimmableSize() call
+// that actually activates it -- which the ObjC bridge calls inline on the real-time
+// render thread -- reduces to a cheap atomic index flip instead of redoing that work.
+// See NAMProcessorWrapper.mm's real-time-deadline pop this was built to fix.
+
+void test_container_prewarm_for_ratio_resets_without_activating()
+{
+  CountingDSP* small = nullptr;
+  CountingDSP* large = nullptr;
+  auto dsp = build_counting_container(small, large);
+  dsp->Reset(48000.0, 64); // large is default-active; this resets large once.
+
+  auto* slimmable = dynamic_cast<nam::SlimmableModel*>(dsp.get());
+  assert(slimmable != nullptr);
+
+  slimmable->PrewarmForRatio(0.0); // targets small (0.0 < max_value 0.5)
+
+  assert(small->reset_count == 1);
+  assert(small->prewarm_count == 1);
+  // Still processing through large -- PrewarmForRatio must not activate.
+  assert(process_one_sample(dsp.get()) == large->process_value);
+}
+
+void test_container_set_slimmable_size_after_prewarm_skips_redundant_reset()
+{
+  CountingDSP* small = nullptr;
+  CountingDSP* large = nullptr;
+  auto dsp = build_counting_container(small, large);
+  dsp->Reset(48000.0, 64);
+
+  auto* slimmable = dynamic_cast<nam::SlimmableModel*>(dsp.get());
+  assert(slimmable != nullptr);
+
+  slimmable->PrewarmForRatio(0.0);
+  assert(small->reset_count == 1);
+
+  slimmable->SetSlimmableSize(0.0);
+
+  // The staged Reset() from PrewarmForRatio must be reused, not redone.
+  assert(small->reset_count == 1);
+  assert(process_one_sample(dsp.get()) == small->process_value);
+}
+
+void test_container_set_slimmable_size_without_prewarm_still_resets()
+{
+  // Fallback path: SetSlimmableSize() without a prior PrewarmForRatio() must behave
+  // exactly as before (synchronous Reset()), matching test_container_switch_resets_before_activation.
+  CountingDSP* small = nullptr;
+  CountingDSP* large = nullptr;
+  auto dsp = build_counting_container(small, large);
+  dsp->Reset(48000.0, 64);
+
+  auto* slimmable = dynamic_cast<nam::SlimmableModel*>(dsp.get());
+  assert(slimmable != nullptr);
+
+  slimmable->SetSlimmableSize(0.0);
+
+  assert(small->reset_count == 1);
+  assert(process_one_sample(dsp.get()) == small->process_value);
+}
+
+void test_container_prewarm_for_ratio_already_active_is_noop()
+{
+  CountingDSP* small = nullptr;
+  CountingDSP* large = nullptr;
+  auto dsp = build_counting_container(small, large);
+  dsp->Reset(48000.0, 64); // resets large (default-active) once.
+  assert(large->reset_count == 1);
+
+  auto* slimmable = dynamic_cast<nam::SlimmableModel*>(dsp.get());
+  assert(slimmable != nullptr);
+
+  slimmable->PrewarmForRatio(1.0); // large is already active -- must be a no-op.
+
+  assert(large->reset_count == 1);
+}
+
+void test_container_prewarm_for_ratio_stale_stage_falls_back_to_reset()
+{
+  // If the user changes their mind before a staged prewarm is consumed (prewarm for A,
+  // then switch to B instead), SetSlimmableSize(B) must not mistake A's staged reset for
+  // its own and must still reset B synchronously.
+  CountingDSP* small = nullptr;
+  CountingDSP* large = nullptr;
+  auto dsp = build_counting_container(small, large);
+  dsp->Reset(48000.0, 64); // large active
+
+  auto* slimmable = dynamic_cast<nam::SlimmableModel*>(dsp.get());
+  assert(slimmable != nullptr);
+
+  slimmable->PrewarmForRatio(0.0); // stages small
+  assert(small->reset_count == 1);
+
+  slimmable->SetSlimmableSize(1.0); // no-op: 1.0 selects large, already active
+
+  // Now switch to small for real -- its stage from PrewarmForRatio(0.0) is still valid
+  // (nothing invalidated it), so this must NOT reset small again.
+  slimmable->SetSlimmableSize(0.0);
+  assert(small->reset_count == 1);
+  assert(process_one_sample(dsp.get()) == small->process_value);
+}
+
 // Real exported .nam files store "config.layers" as an array of per-layer-group
 // objects (each with its own "channels" field), not the flat integer used by
 // spice-to-nam's ParametricWaveNet format. GetAllowedSizes() must extract the
