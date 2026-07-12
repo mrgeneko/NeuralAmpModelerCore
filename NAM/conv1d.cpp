@@ -264,7 +264,6 @@ void Conv1D::Process(const Eigen::MatrixXf& input, const int num_frames)
     const int out_ch = (int)get_out_channels();
     const int in_ch = (int)get_in_channels();
     const size_t kernel_size = this->_weight.size();
-    const size_t weight_matrix_size = out_ch * in_ch;
 
     // Fused kernel optimization for kernel_size=3
     // Instead of 3 separate passes over output, fuse into single pass
@@ -282,7 +281,6 @@ void Conv1D::Process(const Eigen::MatrixXf& input, const int num_frames)
       float* __restrict__ output_ptr = _output.data();
 
       // Get weight pointers for all 3 taps
-      const size_t wsize = 16; // 4x4
       const float* __restrict__ w0 = this->_weight[0].data();
       const float* __restrict__ w1 = this->_weight[1].data();
       const float* __restrict__ w2 = this->_weight[2].data();
