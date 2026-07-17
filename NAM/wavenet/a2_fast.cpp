@@ -1894,11 +1894,16 @@ bool film_inactive(const nlohmann::json& layer, const char* key)
 //
 // Optimized fast path for ParametricWaveNet (A2 topology + per-layer FiLM).
 //
-// Two structural differences from A2FastModel:
+// One structural difference from A2FastModel:
 //   1. FiLM (gamma * x + beta) applied after conv+mixin, before LeakyReLU.
 //      Gamma and beta are precomputed from knob atomics once per buffer.
-//   2. Head receives the FINAL LAYER's l1x1+residual output directly —
-//      no per-layer skip-connection accumulation (matches Python ParametricA2).
+//
+// The head is fed the same way as A2FastModel: _head_sum accumulates every
+// layer's post-activation output (standard WaveNet skip connections), matching
+// how NAM's parametric training actually builds these models. (An earlier,
+// now-removed residual-only head variant fed the head from just the final
+// layer's output instead -- see the SKIP-ONLY refactor; this doc comment used
+// to describe that removed behavior.)
 //
 // Everything else (ring buffers, weight loading skeleton, head conv) is
 // identical to A2FastModel so the same throughput characteristics apply.
@@ -1988,8 +1993,8 @@ private:
   float _head_b = 0.0f;
   float _head_scale = 1.0f;
 
-  // Head ring buffer. Reads from _layer_in (final layer residual output),
-  // NOT from a skip-connection accumulator.
+  // Head ring buffer. Reads from _head_sum (the skip-connection accumulator),
+  // not from _layer_in.
   std::vector<float> _head_history;
   #if NAM_A2_RING_MODE == 1
   int _head_pow2_size = 0;
@@ -2021,7 +2026,7 @@ private:
   // Rebuild _film_gamma/_film_beta for all layers from _knob_atoms. Audio thread only.
   void _recompute_film();
   void _ring_write(Layer& L, int num_frames);
-  // Write _layer_in (final layer residual) into _head_history ring.
+  // Write _head_sum (the skip-connection accumulator) into _head_history ring.
   void _head_ring_write(int num_frames);
 
   template <int KernelSize>
@@ -2255,7 +2260,7 @@ void ParametricA2FastModel<Channels>::_ring_write(Layer& L, int num_frames)
   #endif
 }
 
-// --- Head ring write: source is _layer_in (final layer residual, NOT a skip sum) ---
+// --- Head ring write: source is _head_sum (the skip-connection accumulator) ---
 template <int Channels>
 void ParametricA2FastModel<Channels>::_head_ring_write(int num_frames)
 {
@@ -3149,12 +3154,13 @@ void ParametricA2FastModel<Channels>::process(NAM_SAMPLE** input, NAM_SAMPLE** o
   // Zero the skip accumulator for this buffer.
   std::memset(_head_sum.data(), 0, static_cast<size_t>(num_frames) * Channels * sizeof(float));
 
-  // Run all 23 layers. Afterwards _layer_in holds the final layer's l1x1+residual output and,
-  // for skip models, _head_sum holds the sum of every layer's post-activation.
+  // Run all 23 layers. Afterwards _layer_in holds the final layer's l1x1+residual output
+  // (feeds the next layer, not the head), and _head_sum holds the sum of every layer's
+  // post-activation -- parametric models are SKIP-ONLY, so this is the only path.
   for (int li = 0; li < kNumLayers; li++)
     _layer_forward(li, cond, num_frames);
 
-  // Head: reads _head_sum (skip) or _layer_in (residual) via _head_ring_write.
+  // Head: reads _head_sum (skip accumulator) via _head_ring_write.
   float* head_out = _head_out.data();
   _head_forward(head_out, num_frames);
 
