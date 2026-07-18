@@ -1,12 +1,54 @@
 name: Run Integration Tests
 
+# Builds the real NeuralAmpModelerPlugin (fork: mrgeneko/NeuralAmpModelerPlugin) against
+# the exact commit under test, to catch anything that breaks the actual downstream
+# consumer -- not just this repo's own unit tests. Replaces a workflow that called a
+# reusable action hosted in a separate, inaccessible org (Atkinson-Advanced-Modeling/
+# NamIntegrationTests); that one never ran successfully from this fork.
+
 on:
   pull_request:
-    branches: [main, integration-tests]
+  workflow_dispatch:
 
 jobs:
-  call-integration-tests:
-    uses: Atkinson-Advanced-Modeling/NamIntegrationTests/.github/workflows/integration-tests.yml@main
-    with:
-      source_repo: NeuralAmpModelerCore
-      ref: ${{ github.event.pull_request.head.sha }}
+  build-plugin:
+    name: Build NeuralAmpModelerPlugin against this core
+    runs-on: macos-latest
+    steps:
+      - name: Check out this core (at the commit under test)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          path: core-under-test
+
+      - name: Check out the plugin fork
+        uses: actions/checkout@v4
+        with:
+          repository: mrgeneko/NeuralAmpModelerPlugin
+          submodules: recursive
+          path: plugin
+
+      - name: Swap in this core's exact working tree
+        run: |
+          rm -rf plugin/NeuralAmpModelerCore
+          cp -R core-under-test plugin/NeuralAmpModelerCore
+          rm -rf plugin/NeuralAmpModelerCore/.git
+        shell: bash
+
+      - name: Get VST3 SDK
+        working-directory: plugin/iPlug2/Dependencies/IPlug
+        run: ./download-iplug-sdks.sh
+        shell: bash
+
+      - name: Get Prebuilt Libs
+        working-directory: plugin/iPlug2/Dependencies
+        run: ./download-prebuilt-libs.sh mac
+        shell: bash
+
+      - name: Build macOS AU (unsigned)
+        working-directory: plugin/NeuralAmpModeler
+        run: |
+          xcodebuild -workspace NeuralAmpModeler.xcworkspace -scheme "macOS-AUv2" -configuration Release \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+        shell: bash
