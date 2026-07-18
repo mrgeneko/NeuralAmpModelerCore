@@ -664,6 +664,99 @@ void test_process_realtime_safe_standard()
   test_process_realtime_safe(8);
 }
 
+// [Fork] BEGIN: per-buffer knob smoothing convergence test (Gap 1).
+//
+// ParametricA2FastModel::_recompute_film one-pole smooths knob targets toward the
+// atomic value SetKnobValues() writes (see a2_fast.cpp ~line 2160), specifically to
+// avoid zipper noise on a sudden UI knob move. Prior to this test, that smoothing had
+// zero coverage: nothing proved it actually ramps rather than snapping instantly (or,
+// conversely, that it eventually gets there instead of stalling partway).
+//
+// Strategy: run one model through a knob jump (0.5 -> 1.0) and sample immediately
+// (one buffer later) and long after (many buffers later, past the smoother's time
+// constant). Compare both samples against a second, separately-constructed reference
+// model whose knobs were set to 1.0 before its first process() call (so by the time
+// IT has run for the same number of buffers, its own smoother has also fully
+// converged to 1.0 -- there is no way to observe a "no-transition-at-all" reference,
+// since the smoother always starts at the constructor's default 0.5). Both models
+// see byte-identical input content on every buffer, so once each has converged, their
+// internal FIR/ring-buffer state is also driven by the same steady periodic input and
+// the two outputs must agree closely.
+void test_parametric_knob_smoothing_converges()
+{
+  const int channels = 3;
+  const int num_params = 1;
+  const double sample_rate = 48000.0;
+  const int block = 256;
+
+  const auto cfg = build_parametric_a2_config(channels, num_params);
+  const int weight_count = parametric_a2_weight_count(channels, num_params);
+  const auto weights = make_deterministic_weights(weight_count, /*seed=*/0x50007E5u);
+
+  // Fixed input content, replayed identically every buffer.
+  const auto input = make_test_input(block, sample_rate);
+
+  auto run_buffers = [&](nam::DSP& dsp, int n) {
+    std::vector<NAM_SAMPLE> out(block, static_cast<NAM_SAMPLE>(0));
+    NAM_SAMPLE* in_ptr = const_cast<NAM_SAMPLE*>(input.data());
+    NAM_SAMPLE* out_ptr = out.data();
+    NAM_SAMPLE* in_arr[] = {in_ptr};
+    NAM_SAMPLE* out_arr[] = {out_ptr};
+    for (int i = 0; i < n; i++)
+      dsp.process(in_arr, out_arr, block);
+    return out;
+  };
+
+  // Model A: starts at the default (0.5), jumps to 1.0, sampled right after the jump
+  // and again long after.
+  auto cfg_a = nam::wavenet::a2_fast::create_parametric_a2_fast_config(cfg, sample_rate);
+  std::vector<float> w_a = weights;
+  auto dsp_a = cfg_a->create(std::move(w_a), sample_rate);
+  dsp_a->Reset(sample_rate, block);
+  run_buffers(*dsp_a, 2); // let it "settle" at the default -- no-op, already there
+  dsp_a->SetKnobValues({1.0f});
+  const auto out_immediate = run_buffers(*dsp_a, 1); // ONE buffer immediately after the jump
+
+  // Enough buffers for (1 - coeff)^n to be negligible, derived from the same formula
+  // Reset() uses (a2_fast.cpp ~line 2231-2232), plus a healthy margin.
+  const float smoothTimeSamples = static_cast<float>(sample_rate) * 0.020f;
+  const float coeff = 1.0f - std::exp(-static_cast<float>(block) / smoothTimeSamples);
+  const int n_converge = static_cast<int>(std::ceil(std::log(1e-6) / std::log(1.0 - coeff))) + 20;
+  const auto out_settled = run_buffers(*dsp_a, n_converge); // MANY buffers later
+
+  // Model B: reference -- knobs set to 1.0 before the very first process() call (no
+  // jump to observe from this model's own perspective).
+  auto cfg_b = nam::wavenet::a2_fast::create_parametric_a2_fast_config(cfg, sample_rate);
+  std::vector<float> w_b = weights;
+  auto dsp_b = cfg_b->create(std::move(w_b), sample_rate);
+  dsp_b->Reset(sample_rate, block);
+  dsp_b->SetKnobValues({1.0f});
+  const auto out_reference = run_buffers(*dsp_b, 2 + 1 + n_converge);
+
+  auto max_abs_diff = [](const std::vector<NAM_SAMPLE>& a, const std::vector<NAM_SAMPLE>& b) {
+    double d = 0.0;
+    for (size_t i = 0; i < a.size(); i++)
+      d = std::max(d, std::fabs(static_cast<double>(a[i]) - static_cast<double>(b[i])));
+    return d;
+  };
+
+  const double diff_immediate = max_abs_diff(out_immediate, out_reference);
+  const double diff_settled = max_abs_diff(out_settled, out_reference);
+
+  if (!(diff_settled < 1e-5) || !(diff_immediate > 100.0 * std::max(diff_settled, 1e-9)))
+  {
+    std::cerr << "ParametricA2FastModel knob smoothing: diff_immediate=" << diff_immediate
+              << " diff_settled=" << diff_settled << " (want settled << immediate, settled ~ 0)" << std::endl;
+    assert(false);
+  }
+  // The jump has barely begun (knob moved by only 1-(1-coeff) of the way in one
+  // buffer): it must not already match the fully-settled reference.
+  assert(diff_immediate > 100.0 * std::max(diff_settled, 1e-9));
+  // Fully converged: must closely match the reference model's own converged state.
+  assert(diff_settled < 1e-5);
+}
+// [Fork] END: per-buffer knob smoothing convergence test
+
 } // namespace test_a2_fast
 
 #endif // NAM_ENABLE_A2_FAST

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <fstream>
@@ -13,6 +14,8 @@
 #include "NAM/container.h"
 #include "NAM/get_dsp.h"
 #include "NAM/slimmable.h"
+#include "NAM/wavenet/a2_fast.h"           // [Fork] for parametric weight-count formula
+#include "NAM/wavenet/parametric_wavenet.h" // [Fork] for create_parametric_config
 
 namespace test_container
 {
@@ -133,6 +136,66 @@ void process_and_verify(nam::DSP* dsp, int num_buffers, int buffer_size)
       assert(std::isfinite(output[i]));
   }
 }
+
+// [Fork] BEGIN: helpers for ContainerModel knob-API delegation tests (Gap 2)
+//
+// Parametric models always use the A2 layer-array shape (23 layers, fixed kernel/
+// dilation pattern; see NAM/wavenet/parametric_wavenet.h's architecture overview),
+// so the weight count is a function of channel count and knob count alone. This
+// mirrors the same formula test_a2_fast.cpp's (file-local) parametric_a2_weight_count
+// uses, restated here against the public nam::wavenet::a2_fast constants since that
+// helper isn't exported across translation units.
+int parametric_weight_count(int channels, int num_params)
+{
+  using namespace nam::wavenet::a2_fast;
+  int total = channels; // rechannel
+  for (int i = 0; i < kNumLayers; i++)
+  {
+    const int K = kKernelSizes[i];
+    total += channels * channels * K + channels; // conv weight + bias
+    total += channels;                            // input mixin
+    total += channels * channels + channels;      // layer1x1 weight + bias
+    total += 2 * channels * num_params + 2 * channels; // per-layer FiLM net weight + bias
+  }
+  total += channels * kHeadKernelSize + 1; // head rechannel weight + bias
+  total += 1;                              // head_scale
+  return total;
+}
+
+// Builds a real parametric submodel DSP (uniform-valued weights, same convention as
+// test_parametric_wavenet.cpp's test_factory_creates_and_processes_nano) via the same
+// factory path production .nam files go through (create_parametric_config -> create()).
+std::unique_ptr<nam::DSP> make_parametric_submodel(int channels, int num_params, float weight_value,
+                                                    double sample_rate)
+{
+  nlohmann::json cfg;
+  cfg["layers"] = channels;
+  cfg["head_scale"] = 1.0f;
+  cfg["parametric"]["condition_size"] = num_params;
+  cfg["parametric"]["head_mode"] = "skip";
+  cfg["parametric"]["schema_version"] = 1;
+  // Populate real per-knob metadata so GetParameterDefs() has something meaningful to
+  // delegate (an empty "parameters" array is valid but makes defs.size() 0 regardless
+  // of num_params, which would make the delegation test ambiguous).
+  nlohmann::json params = nlohmann::json::array();
+  for (int i = 0; i < num_params; i++)
+    params.push_back({{"name", "knob" + std::to_string(i)}, {"minimum", 0.0f}, {"maximum", 1.0f}, {"default", 0.5f}});
+  cfg["parametric"]["parameters"] = params;
+
+  auto config = nam::wavenet::create_parametric_config(cfg, sample_rate);
+  std::vector<float> weights(parametric_weight_count(channels, num_params), weight_value);
+  return config->create(std::move(weights), sample_rate);
+}
+
+double max_abs_diff(const std::vector<NAM_SAMPLE>& a, const std::vector<NAM_SAMPLE>& b)
+{
+  assert(a.size() == b.size());
+  double d = 0.0;
+  for (size_t i = 0; i < a.size(); i++)
+    d = std::max(d, std::fabs(static_cast<double>(a[i]) - static_cast<double>(b[i])));
+  return d;
+}
+// [Fork] END: helpers for ContainerModel knob-API delegation tests
 
 // =====================================================================
 // Tests
@@ -574,5 +637,109 @@ void test_container_get_allowed_sizes_reads_array_layers_shape()
   for (int size : sizes)
     assert(size != 0);
 }
+
+// [Fork] BEGIN: ContainerModel knob-API delegation tests (Gap 2)
+//
+// GetNumParams()/GetParameterDefs() delegate to _submodels[0]; SetKnobValues() writes to
+// EVERY submodel (not just the active one) so that whichever submodel becomes active next
+// already reflects the current knob state -- see the comment above ContainerModel::
+// SetKnobValues in NAM/container.cpp. None of the three had any test coverage before this.
+
+void test_container_knob_accessors_delegate_to_first_submodel()
+{
+  const double sample_rate = 48000.0;
+  std::vector<nam::container::Submodel> submodels;
+  submodels.push_back({0.5, 3, make_parametric_submodel(3, 1, 0.1f, sample_rate)});
+  submodels.push_back({1.0, 8, make_parametric_submodel(8, 2, 0.1f, sample_rate)});
+
+  auto container =
+    std::make_unique<nam::container::ContainerModel>(std::move(submodels), sample_rate);
+
+  // The first submodel has 1 param; the (currently-active, last) submodel has 2 -- if
+  // GetNumParams/GetParameterDefs delegated to the active submodel instead of the first,
+  // this would read 2, not 1.
+  assert(container->GetNumParams() == 1);
+  const auto defs = container->GetParameterDefs();
+  assert(defs.size() == 1);
+}
+
+// Proves SetKnobValues() writes to a submodel that ISN'T active yet: set knobs, THEN
+// switch the active submodel, then confirm the newly-active submodel's output already
+// reflects the knob value set before the switch -- rather than the default it would show
+// if SetKnobValues() only touched whichever submodel happened to be active at call time.
+void test_container_set_knob_values_reaches_inactive_submodel()
+{
+  const double sample_rate = 48000.0;
+  const int buffer_size = 64;
+  const float weight_value = 0.1f;
+
+  std::vector<nam::container::Submodel> submodels;
+  submodels.push_back({0.5, 3, make_parametric_submodel(3, 1, weight_value, sample_rate)});
+  submodels.push_back({1.0, 8, make_parametric_submodel(8, 1, weight_value, sample_rate)});
+
+  auto container =
+    std::make_unique<nam::container::ContainerModel>(std::move(submodels), sample_rate);
+  // Default-active submodel is the LAST one (channels=8); this only resets that one.
+  container->Reset(sample_rate, buffer_size);
+
+  // Set knobs to a distinctly non-default value while submodel 0 (channels=3) is still
+  // inactive and has never been Reset().
+  container->SetKnobValues({0.9f});
+
+  auto* slimmable = dynamic_cast<nam::SlimmableModel*>(container.get());
+  assert(slimmable != nullptr);
+  slimmable->SetSlimmableSize(0.0); // switches active -> submodel 0; Resets it here
+
+  std::vector<NAM_SAMPLE> input(buffer_size);
+  for (int i = 0; i < buffer_size; i++)
+    input[i] = static_cast<NAM_SAMPLE>(0.3 * std::sin(2.0 * M_PI * 220.0 * i / sample_rate));
+
+  std::vector<NAM_SAMPLE> out_container(buffer_size);
+  {
+    NAM_SAMPLE* in_ptr = input.data();
+    NAM_SAMPLE* out_ptr = out_container.data();
+    container->process(&in_ptr, &out_ptr, buffer_size);
+  }
+
+  // Reference A: standalone channels=3 model with the SAME weights, knob set to 0.9
+  // BEFORE Reset() -- the same call order the container's submodel 0 actually saw.
+  auto ref_hi = make_parametric_submodel(3, 1, weight_value, sample_rate);
+  ref_hi->SetKnobValues({0.9f});
+  ref_hi->Reset(sample_rate, buffer_size);
+  std::vector<NAM_SAMPLE> out_ref_hi(buffer_size);
+  {
+    NAM_SAMPLE* in_ptr = input.data();
+    NAM_SAMPLE* out_ptr = out_ref_hi.data();
+    ref_hi->process(&in_ptr, &out_ptr, buffer_size);
+  }
+
+  // Reference B: standalone channels=3 model left at the constructor default (0.5) --
+  // what the container would have produced if SetKnobValues() had only reached whichever
+  // submodel was active at call time (i.e., NOT submodel 0).
+  auto ref_default = make_parametric_submodel(3, 1, weight_value, sample_rate);
+  ref_default->Reset(sample_rate, buffer_size);
+  std::vector<NAM_SAMPLE> out_ref_default(buffer_size);
+  {
+    NAM_SAMPLE* in_ptr = input.data();
+    NAM_SAMPLE* out_ptr = out_ref_default.data();
+    ref_default->process(&in_ptr, &out_ptr, buffer_size);
+  }
+
+  const double diff_vs_hi = max_abs_diff(out_container, out_ref_hi);
+  const double diff_vs_default = max_abs_diff(out_container, out_ref_default);
+
+  if (!(diff_vs_hi < 1e-6) || !(diff_vs_default > 1000.0 * std::max(diff_vs_hi, 1e-9)))
+  {
+    std::cerr << "ContainerModel::SetKnobValues delegation: diff_vs_hi=" << diff_vs_hi
+              << " diff_vs_default=" << diff_vs_default << " (want vs_hi ~ 0, vs_default >> vs_hi)"
+              << std::endl;
+    assert(false);
+  }
+  // Matches the "knob was already 0.9" reference almost exactly...
+  assert(diff_vs_hi < 1e-6);
+  // ...and is clearly NOT what we'd see if the knob had stayed at the default.
+  assert(diff_vs_default > 1000.0 * std::max(diff_vs_hi, 1e-9));
+}
+// [Fork] END: ContainerModel knob-API delegation tests
 
 } // namespace test_container

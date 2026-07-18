@@ -64,6 +64,9 @@ else()
 	)
 endif()
 add_executable(run_tests run_tests.cpp test/allocation_tracking.cpp ${NAM_SOURCES})
+# [Fork] test_render_parametric.cpp drives the real render_parametric binary as a
+# subprocess; make sure it's always built before run_tests runs.
+add_dependencies(run_tests render_parametric)
 # Compile run_tests without optimizations to ensure allocation tracking works correctly
 # Also ensure assertions are enabled (NDEBUG is not defined) so tests actually run
 set_target_properties(run_tests PROPERTIES COMPILE_OPTIONS "-O0")

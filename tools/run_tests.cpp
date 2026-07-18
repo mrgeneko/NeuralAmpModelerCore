@@ -37,6 +37,7 @@
 #include "test/test_slimmable_wavenet.cpp"
 #include "test/test_a2_fast.cpp"
 #include "test/test_parametric_wavenet.cpp"
+#include "test/test_render_parametric.cpp"
 
 int main()
 {
@@ -338,6 +339,10 @@ int main()
   test_container::test_container_prewarm_for_ratio_already_active_is_noop();
   test_container::test_container_prewarm_for_ratio_stale_stage_falls_back_to_reset();
 
+  // [Fork] ContainerModel knob-API delegation (Gap 2)
+  test_container::test_container_knob_accessors_delegate_to_first_submodel();
+  test_container::test_container_set_knob_values_reaches_inactive_submodel();
+
   // Render --slim tests
   test_render_slim::test_slim_changes_output();
   test_render_slim::test_slim_rejects_non_slimmable();
@@ -400,6 +405,11 @@ int main()
   test_a2_fast::test_process_realtime_safe_width6();
   test_a2_fast::test_process_realtime_safe_width7();
   test_a2_fast::test_process_realtime_safe_standard();
+
+  // [Fork] Knob smoothing convergence (Gap 1): proves the one-pole smoother
+  // actually ramps rather than snapping instantly, and that it converges rather than
+  // stalling partway.
+  test_a2_fast::test_parametric_knob_smoothing_converges();
 #endif
 
   // ParametricWaveNet: config parsing, construction, processing, SetKnobValues, registry, factory
@@ -437,6 +447,14 @@ int main()
   test_parametric_wavenet::test_standard_wavenet_unaffected();
   test_parametric_wavenet::test_dc_blocker_removes_dc_at_silence();
   test_parametric_wavenet::test_dc_blocker_passes_ac_signal();
+
+  // [Fork] Knob smoothing convergence (Gap 1, ParametricWaveNet's independent
+  // smoother implementation).
+  test_parametric_wavenet::test_knob_smoothing_converges();
+
+  // [Fork] render_parametric CLI integration test (Gap 3): exercises the real
+  // compiled tool as a subprocess.
+  test_render_parametric::test_render_parametric_respects_knobs();
 
   std::cout << "Success!" << std::endl;
 #ifdef ADDASSERT

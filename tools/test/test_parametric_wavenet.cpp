@@ -12,6 +12,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -761,6 +762,80 @@ void test_dc_blocker_passes_ac_signal()
   for (int i = 0; i < buf; ++i)
     diff += std::abs((float)out_signal[i] - (float)out_silence[i]);
   assert(diff > 0.001f); // outputs should be measurably different
+}
+
+// =============================================================================
+// 9. Knob smoothing: proves the one-pole smoother in ParametricWaveNet::
+//    _process_condition (parametric_wavenet.cpp ~line 107-113) actually ramps
+//    rather than snapping instantly, and that it does converge rather than
+//    stalling partway or diverging. Independent implementation from
+//    ParametricA2FastModel's (a2_fast.cpp), covered separately in
+//    test_a2_fast::test_parametric_knob_smoothing_converges.
+// =============================================================================
+
+void test_knob_smoothing_converges()
+{
+  const int num_params = 1;
+  const double sample_rate = 48000.0;
+  const int block = 256;
+
+  // Fixed input content, replayed identically every buffer so that once both the
+  // knob smoother and any FIR/ring-buffer history converge, outputs stop moving.
+  std::vector<NAM_SAMPLE> input(block);
+  for (int i = 0; i < block; ++i)
+    input[i] = static_cast<NAM_SAMPLE>(0.3 * std::sin(2.0 * M_PI * 220.0 * i / sample_rate));
+
+  auto run_buffers = [&](nam::wavenet::ParametricWaveNet& pwn, int n) {
+    std::vector<NAM_SAMPLE> out(block, 0.0f);
+    NAM_SAMPLE* in_ptr = input.data();
+    NAM_SAMPLE* out_ptr = out.data();
+    for (int i = 0; i < n; ++i)
+      pwn.process(&in_ptr, &out_ptr, block);
+    return out;
+  };
+
+  // Model A: starts at the default (0.5), jumps to 1.0, sampled right after the jump
+  // and again long after.
+  auto pwn_a = make_tiny_pwn(num_params);
+  pwn_a->Reset(sample_rate, block);
+  run_buffers(*pwn_a, 2); // let it "settle" at the default -- no-op, already there
+  pwn_a->SetKnobValues({1.0f});
+  const auto out_immediate = run_buffers(*pwn_a, 1); // ONE buffer immediately after the jump
+
+  // Enough buffers for (1 - coeff)^n to be negligible, derived from the same formula
+  // Reset() uses (parametric_wavenet.cpp ~line 85-86), plus a healthy margin.
+  const float smoothTimeSamples = static_cast<float>(sample_rate) * 0.020f;
+  const float coeff = 1.0f - std::exp(-static_cast<float>(block) / smoothTimeSamples);
+  const int n_converge = static_cast<int>(std::ceil(std::log(1e-6) / std::log(1.0 - coeff))) + 20;
+  const auto out_settled = run_buffers(*pwn_a, n_converge); // MANY buffers later
+
+  // Model B: reference -- knobs set to 1.0 before the very first process() call (no
+  // jump to observe from this model's own perspective).
+  auto pwn_b = make_tiny_pwn(num_params);
+  pwn_b->Reset(sample_rate, block);
+  pwn_b->SetKnobValues({1.0f});
+  const auto out_reference = run_buffers(*pwn_b, 2 + 1 + n_converge);
+
+  auto max_abs_diff = [](const std::vector<NAM_SAMPLE>& a, const std::vector<NAM_SAMPLE>& b) {
+    double d = 0.0;
+    for (size_t i = 0; i < a.size(); ++i)
+      d = std::max(d, std::fabs(static_cast<double>(a[i]) - static_cast<double>(b[i])));
+    return d;
+  };
+
+  const double diff_immediate = max_abs_diff(out_immediate, out_reference);
+  const double diff_settled = max_abs_diff(out_settled, out_reference);
+
+  if (!(diff_settled < 1e-5) || !(diff_immediate > 100.0 * std::max(diff_settled, 1e-9)))
+  {
+    std::cerr << "ParametricWaveNet knob smoothing: diff_immediate=" << diff_immediate
+              << " diff_settled=" << diff_settled << " (want settled << immediate, settled ~ 0)" << std::endl;
+    assert(false);
+  }
+  // The jump has barely begun: must not already match the fully-settled reference.
+  assert(diff_immediate > 100.0 * std::max(diff_settled, 1e-9));
+  // Fully converged: must closely match the reference model's own converged state.
+  assert(diff_settled < 1e-5);
 }
 
 } // namespace test_parametric_wavenet
