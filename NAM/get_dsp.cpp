@@ -149,7 +149,7 @@ void populate_dsp_data(const nlohmann::json& config, dspData& returnedConfig)
   //   { "architecture": "WaveNet",   <- a baked snapshot; stock NAM plugins read this and
   //     "config": {...},                play a fixed tone (they ignore unknown keys)
   //     "weights": [...],
-  //     "embedded_parametric": {   <- the real parametric model; we prefer THIS so the
+  //     "embedded_parametric": {     <- the real parametric model; we prefer THIS so the
   //       "architecture": "ParametricWaveNet", ...  user gets live knobs
   //     } }
   //
