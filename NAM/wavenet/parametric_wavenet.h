@@ -93,7 +93,7 @@ struct ParametricParam
 // path and every stock plugin already compute. There is exactly one head; there is no mode
 // to choose.
 //
-// The legacy "residual" head (head reads the final layer's residual) was a Fork-only
+// The legacy "residual" head (head reads the final layer's residual) was a fork-only
 // convention. It is GONE. But models carrying it still exist on disk, and residual weights
 // run under a skip head produce garbage (corr ~0.3) with no error -- so we refuse to load
 // them rather than play them.

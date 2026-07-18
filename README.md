@@ -1,4 +1,4 @@
-# NeuralAmpModelerCore (Fork fork)
+# NeuralAmpModelerCore (fork)
 
 [![Build](https://github.com/mrgeneko/NeuralAmpModelerCore/actions/workflows/build.yml/badge.svg)](https://github.com/mrgeneko/NeuralAmpModelerCore/actions/workflows/build.yml)
 

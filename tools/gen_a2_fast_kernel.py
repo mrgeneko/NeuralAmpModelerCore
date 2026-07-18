@@ -6,7 +6,7 @@ still fall back to the generic Eigen fixed-size-matrix path (see the `else`
 branch after the highest `else if constexpr (Channels == ...)` in each
 _layer_forward_k). That Eigen path measures far more CPU than its arithmetic
 complexity implies at these small inner dimensions -- see
-docs/Architecture/NAM_PERFORMANCE_INVESTIGATION.md in the outer Fork
+docs/Architecture/NAM_PERFORMANCE_INVESTIGATION.md in the outer app
 repo for the full investigation.
 
 Usage:

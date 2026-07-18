@@ -1894,7 +1894,7 @@ bool film_inactive(const nlohmann::json& layer, const char* key)
 // [Fork] BEGIN: ParametricA2FastModel<Channels>
 //
 // Fast path for ParametricWaveNet, replacing the generic Eigen WaveNet path
-// (~17× faster on Apple Silicon). Added by Fork — not in upstream NAM.
+// (~17× faster on Apple Silicon). Added by this fork — not in upstream NAM.
 //
 // Optimized fast path for ParametricWaveNet (A2 topology + per-layer FiLM).
 //

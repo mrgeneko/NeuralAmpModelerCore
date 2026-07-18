@@ -52,7 +52,7 @@ public:
   // Upstream's normalized-breakpoint counterpart to GetAllowedSizes() above -- same
   // underlying need (surface discrete size options to a host), different representation
   // (0.0-1.0 breakpoints vs. raw channel counts). Kept alongside GetAllowedSizes() rather
-  // than merged: Fork's own code depends on the concrete channel-count values, and
+  // than merged: this fork's own code depends on the concrete channel-count values, and
   // keeping this preserves source compatibility with anything upstream that calls it.
   virtual std::vector<double> GetSlimmableSizeBreakpoints() const { return {}; }
 };

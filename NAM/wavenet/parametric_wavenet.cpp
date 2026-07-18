@@ -138,7 +138,7 @@ void require_supported_parametric_model(const nlohmann::json& config)
     std::ostringstream ss;
     ss << "ParametricWaveNet: parametric schema_version " << schema
        << " is newer than this build supports (max " << kMaxParametricSchemaVersion
-       << "). Update Fork -- loading it anyway would silently produce wrong audio.";
+       << "). Update this fork's parser -- loading it anyway would silently produce wrong audio.";
     throw std::runtime_error(ss.str());
   }
 
