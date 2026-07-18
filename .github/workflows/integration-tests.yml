@@ -52,3 +52,50 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build
         shell: bash
+
+  build-plugin-windows:
+    name: Build NeuralAmpModelerPlugin against this core (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Check out this core (at the commit under test)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          path: core-under-test
+
+      - name: Check out the plugin fork
+        uses: actions/checkout@v4
+        with:
+          repository: mrgeneko/NeuralAmpModelerPlugin
+          submodules: recursive
+          path: plugin
+
+      - name: Swap in this core's exact working tree
+        run: |
+          rm -rf plugin/NeuralAmpModelerCore
+          cp -R core-under-test plugin/NeuralAmpModelerCore
+          rm -rf plugin/NeuralAmpModelerCore/.git
+        shell: bash
+
+      - name: Get VST3 SDK
+        working-directory: plugin/iPlug2/Dependencies/IPlug
+        run: ./download-iplug-sdks.sh
+        shell: bash
+
+      - name: Get Prebuilt Libs
+        working-directory: plugin/iPlug2/Dependencies
+        run: ./download-prebuilt-libs.sh win
+        shell: bash
+
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@v1.0.2
+
+      # VST3 only, not AAX/APP: this is a build-verification job, not the full release/
+      # installer pipeline (that's build-native.yml, which additionally needs 7-Zip and
+      # InnoSetup on the runner). Deliberately doesn't reuse makedist-win.bat for the same
+      # reason -- it bumps version numbers and builds an installer, well beyond "does the
+      # core commit under test still compile against the real plugin."
+      - name: Build Windows VST3 (x64, Release)
+        working-directory: plugin/NeuralAmpModeler
+        run: msbuild NeuralAmpModeler.sln /t:NeuralAmpModeler-vst3 /p:Configuration=Release /p:Platform=x64
+        shell: pwsh
