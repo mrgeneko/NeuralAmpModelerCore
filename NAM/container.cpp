@@ -82,6 +82,9 @@ void ContainerModel::Reset(const double sampleRate, const int maxBufferSize)
   _submodels[active_index].model->Reset(sampleRate, maxBufferSize);
 }
 
+// Shared by SetSlimmableSize() and PrewarmForRatio() -- identical computation upstream
+// independently added under a different name (_get_index_for_slimmable_size); consolidated
+// to one helper rather than keeping a duplicate.
 size_t ContainerModel::_index_for_ratio(const double val) const
 {
   size_t active_index = _submodels.size() - 1;
@@ -98,7 +101,7 @@ size_t ContainerModel::_index_for_ratio(const double val) const
 
 void ContainerModel::SetSlimmableSize(const double val)
 {
-  size_t active_index = _index_for_ratio(val);
+  const size_t active_index = _index_for_ratio(val);
 
   // Fast path: no change to active model.
   if (active_index == _active_index.load(std::memory_order_acquire))
@@ -148,6 +151,17 @@ void ContainerModel::PrewarmForRatio(const double val)
   _prewarmed_index.store((int)target_index, std::memory_order_release);
 }
 // [Fork] END
+
+std::vector<double> ContainerModel::GetSlimmableSizeBreakpoints() const
+{
+  std::vector<double> breakpoints;
+  breakpoints.reserve(_submodels.size() - 1);
+
+  for (size_t i = 0; i + 1 < _submodels.size(); ++i)
+    breakpoints.push_back(_submodels[i].max_value);
+
+  return breakpoints;
+}
 
 int ContainerModel::GetPrewarmSamples()
 {

@@ -177,7 +177,11 @@ A2FastModel<Channels>::A2FastModel(std::vector<float> weights, double expected_s
 
   _load_weights(weights);
 
-  int prewarm = 0;
+  // Receptive field = 1 (the sample being produced) + sum of per-layer lookbacks +
+  // (head kernel - 1). The leading 1 matches the generic WaveNet's prewarm count
+  // (model.cpp: mPrewarmSamples starts at 1 when there's no condition DSP), so the
+  // fast path warms up by exactly the same number of samples as the model it replaces.
+  int prewarm = 1;
   for (int i = 0; i < kNumLayers; i++)
     prewarm += _layers[i].max_lookback;
   prewarm += kHeadKernelSize - 1;
@@ -3231,6 +3235,17 @@ bool is_a2_shape(const nlohmann::json& config, int* channels)
   if (head_it != config.end() && !head_it->is_null())
     return false;
 
+  // No conditioning DSP. When given a non-null condition_dsp the generic WaveNet
+  // builds a nested model and routes the conditioning signal through it before the
+  // layer stack; the fast path has no such stage and feeds the raw input as the
+  // condition. The condition DSP carries its own weights, so the parent weight
+  // stream is identical with or without it and the loader cannot detect the
+  // difference -- the detector must reject it here, or the fast path would silently
+  // produce different audio than the model it replaces.
+  auto cond_it = config.find("condition_dsp");
+  if (cond_it != config.end() && !cond_it->is_null())
+    return false;
+
   // head_scale is loaded from the trailing weight, but require the field to
   // stay schema-compatible with the generic WaveNet parser.
   auto hs_it = config.find("head_scale");
@@ -3296,6 +3311,14 @@ bool is_a2_shape(const nlohmann::json& config, int* channels)
       return false;
   }
 
+  // Legacy boolean `gated` (the pre-gating_mode schema): the generic parser maps
+  // gated==true to GATED layers, which the fast path does not implement. A genuinely
+  // gated model has a larger weight stream and the loader would throw, but reject it
+  // here so the boundary is enforced by the detector rather than a downstream error.
+  auto gated_it = la.find("gated");
+  if (gated_it != la.end() && gated_it->is_boolean() && gated_it->get<bool>())
+    return false;
+
   // secondary_activation: all null (or field absent)
   auto sa_it = la.find("secondary_activation");
   if (sa_it != la.end() && !sa_it->is_null())
@@ -3325,6 +3348,8 @@ bool is_a2_shape(const nlohmann::json& config, int* channels)
   if (lah_it->value("out_channels", 0) != 1)
     return false;
   if (lah_it->value("kernel_size", 0) != kHeadKernelSize)
+    return false;
+  if (lah_it->value("head_dilation", 1) != 1)
     return false;
   if (!lah_it->value("bias", false))
     return false;

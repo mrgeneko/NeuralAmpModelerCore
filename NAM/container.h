@@ -46,6 +46,7 @@ public:
   void SetSlimmableSize(const double val) override;
   void PrewarmForRatio(const double val) override; // [Fork]
   std::vector<int> GetAllowedSizes() const override; // [Fork]
+  std::vector<double> GetSlimmableSizeBreakpoints() const override;
   int GetPrewarmSamples() override;
 
   // [Fork] Propagate knob API through the container to its submodels.
@@ -58,7 +59,9 @@ public:
 
 private:
   // [Fork] BEGIN: PrewarmForRatio() staging
-  /// Index computation shared by SetSlimmableSize() and PrewarmForRatio().
+  /// Index computation shared by SetSlimmableSize() and PrewarmForRatio(). Upstream
+  /// independently added the same computation under _get_index_for_slimmable_size();
+  /// consolidated to this one helper during the upstream merge rather than keeping a duplicate.
   size_t _index_for_ratio(const double val) const;
   /// Index most recently Reset()+prewarmed by PrewarmForRatio(), or -1 if none is
   /// staged / the staged one was already consumed by SetActiveIndex.

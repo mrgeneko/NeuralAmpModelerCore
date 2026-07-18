@@ -319,12 +319,12 @@ void nam::wavenet::detail::Layer::Process(const Eigen::MatrixXf& input, const Ei
         // Column-major: need to copy column by column with stride
         const int out_rows = (int)bottleneck;
         const int z_rows = (int)this->_z.rows(); // 2*bottleneck for gated
-        const float* __restrict__ src = this->_z.data();
-        float* __restrict__ dst = this->_output_head.data();
+        const float* NAM_RESTRICT src = this->_z.data();
+        float* NAM_RESTRICT dst = this->_output_head.data();
         for (int f = 0; f < num_frames; f++)
         {
-          const float* __restrict__ src_col = src + f * z_rows;
-          float* __restrict__ dst_col = dst + f * out_rows;
+          const float* NAM_RESTRICT src_col = src + f * z_rows;
+          float* NAM_RESTRICT dst_col = dst + f * out_rows;
           for (int r = 0; r < out_rows; r++)
             dst_col[r] = src_col[r];
         }
@@ -345,9 +345,9 @@ void nam::wavenet::detail::Layer::Process(const Eigen::MatrixXf& input, const Ei
     {
       const int channels = (int)this->get_channels();
       const int total = channels * num_frames;
-      const float* __restrict__ in_ptr = input.data();
-      const float* __restrict__ layer_ptr = this->_layer1x1->GetOutput().data();
-      float* __restrict__ out_ptr = this->_output_next_layer.data();
+      const float* NAM_RESTRICT in_ptr = input.data();
+      const float* NAM_RESTRICT layer_ptr = this->_layer1x1->GetOutput().data();
+      float* NAM_RESTRICT out_ptr = this->_output_next_layer.data();
       int i = 0;
       for (; i + 3 < total; i += 4)
       {
@@ -384,7 +384,7 @@ void nam::wavenet::detail::Layer::Process(const Eigen::MatrixXf& input, const Ei
 nam::wavenet::detail::LayerArray::LayerArray(const LayerArrayParams& params)
 : _rechannel(params.input_size, params.channels, false)
 , _head_rechannel(params.head1x1_params.active ? params.head1x1_params.out_channels : params.bottleneck,
-                  params.head_size, params.head_kernel_size, params.head_bias ? 1 : 0, 1, 1)
+                  params.head_size, params.head_kernel_size, params.head_bias ? 1 : 0, params.head_dilation, 1)
 , _head_output_size(params.head1x1_params.active ? params.head1x1_params.out_channels : params.bottleneck)
 {
   const size_t num_layers = params.dilations.size();
@@ -424,7 +424,7 @@ long nam::wavenet::detail::LayerArray::get_receptive_field() const
   long result = 0;
   for (size_t i = 0; i < this->_layers.size(); i++)
     result += this->_layers[i].get_dilation() * (this->_layers[i].get_kernel_size() - 1);
-  result += (long)this->_head_rechannel.get_kernel_size() - 1;
+  result += this->_head_rechannel.get_dilation() * ((long)this->_head_rechannel.get_kernel_size() - 1);
   return result;
 }
 
@@ -482,8 +482,8 @@ void nam::wavenet::detail::LayerArray::ProcessInner(const Eigen::MatrixXf& layer
     {
 #ifdef NAM_USE_INLINE_GEMM
       const int total = (int)this->_head_output_size * num_frames;
-      const float* __restrict__ src = this->_layers[i].GetOutputHead().data();
-      float* __restrict__ dst = this->_head_inputs.data();
+      const float* NAM_RESTRICT src = this->_layers[i].GetOutputHead().data();
+      float* NAM_RESTRICT dst = this->_head_inputs.data();
       int j = 0;
       for (; j + 3 < total; j += 4)
       {
@@ -801,8 +801,8 @@ void nam::wavenet::WaveNet::process(NAM_SAMPLE** input, NAM_SAMPLE** output, con
 
     if (out_channels == 1)
     {
-      const float* __restrict__ src = head_out.data();
-      NAM_SAMPLE* __restrict__ dst = output[0];
+      const float* NAM_RESTRICT src = head_out.data();
+      NAM_SAMPLE* NAM_RESTRICT dst = output[0];
       for (int s = 0; s < num_frames; s++)
         dst[s] = (NAM_SAMPLE)src[s];
     }
@@ -824,8 +824,8 @@ void nam::wavenet::WaveNet::process(NAM_SAMPLE** input, NAM_SAMPLE** output, con
   {
     // Single channel: data is contiguous
     const float scale = this->_head_scale;
-    const float* __restrict__ src = final_head_outputs.data();
-    NAM_SAMPLE* __restrict__ dst = output[0];
+    const float* NAM_RESTRICT src = final_head_outputs.data();
+    NAM_SAMPLE* NAM_RESTRICT dst = output[0];
     for (int s = 0; s < num_frames; s++)
     {
       dst[s] = scale * src[s];
@@ -889,6 +889,7 @@ nam::wavenet::WaveNetConfig nam::wavenet::parse_config_json(const nlohmann::json
     const int condition_size = layer_config["condition_size"];
 
     int head_size = 0;
+    int head_dilation = 1;
     int head_kernel_size = 1;
     bool head_bias = false;
 
@@ -901,6 +902,12 @@ nam::wavenet::WaveNetConfig nam::wavenet::parse_config_json(const nlohmann::json
         throw std::runtime_error("Layer array " + std::to_string(i) + ": 'head' must be a JSON object");
       }
       head_size = head_json.at("out_channels").get<int>();
+
+      if (head_json.contains("head_dilation"))
+      {
+        head_dilation = head_json.at("head_dilation").get<int>();
+      }
+
       head_kernel_size = head_json.at("kernel_size").get<int>();
       head_bias = head_json.at("bias").get<bool>();
     }
@@ -1157,7 +1164,7 @@ nam::wavenet::WaveNetConfig nam::wavenet::parse_config_json(const nlohmann::json
     }
 
     wc.layer_array_params.push_back(nam::wavenet::LayerArrayParams(
-      input_size, condition_size, head_size, head_kernel_size, channels, bottleneck, std::move(kernel_sizes), dilations,
+      input_size, condition_size, head_size, head_dilation, head_kernel_size, channels, bottleneck, std::move(kernel_sizes), dilations,
       std::move(activation_configs), std::move(gating_modes), head_bias, groups, groups_input_mixin, layer1x1_params,
       head1x1_params, std::move(secondary_activation_configs), conv_pre_film_params, conv_post_film_params,
       input_mixin_pre_film_params, input_mixin_post_film_params, activation_pre_film_params,

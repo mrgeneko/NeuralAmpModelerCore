@@ -28,6 +28,7 @@
 #include "test/test_input_buffer_verification.cpp"
 #include "test/test_linear.cpp"
 #include "test/test_lstm.cpp"
+#include "test/test_lstm_realtime_safe.cpp"
 #include "test/test_wavenet_configurable_gating.cpp"
 #include "test/test_noncontiguous_blocks.cpp"
 #include "test/test_extensible.cpp"
@@ -130,6 +131,8 @@ int main()
   test_conv1d::test_process_grouped_dilation();
   test_conv1d::test_process_grouped_channel_isolation();
   test_conv1d::test_get_num_weights_grouped();
+  test_conv1d::test_process_8x4_kernel6_matches_reference();
+  test_conv1d::test_process_1x4_kernel16_matches_reference();
 
   test_conv_1x1::test_construct();
   test_conv_1x1::test_construct_with_groups();
@@ -145,6 +148,9 @@ int main()
   test_conv_1x1::test_process_underscore_grouped();
   test_conv_1x1::test_set_max_buffer_size();
   test_conv_1x1::test_process_multiple_calls();
+  test_conv_1x1::test_process_underscore_4x6_matches_reference();
+  test_conv_1x1::test_process_underscore_8x6_matches_reference();
+  test_conv_1x1::test_process_underscore_4x4_with_bias_matches_reference();
 
   test_film::test_set_max_buffer_size();
   test_film::test_process_bias_only();
@@ -183,6 +189,7 @@ int main()
   test_wavenet::test_output_head::test_wavenet_with_two_layer_post_stack_head_applies_activation_per_layer_input();
   test_wavenet::test_layer_head_config::test_legacy_head_size_and_head_bias_implies_kernel_one();
   test_wavenet::test_layer_head_config::test_nested_head_with_kernel_size_three();
+  test_wavenet::test_layer_head_config::test_nested_head_with_dilation_three();
   test_wavenet::test_full::test_wavenet_multiple_arrays();
   test_wavenet::test_full::test_wavenet_zero_input();
   test_wavenet::test_full::test_wavenet_different_buffer_sizes();
@@ -239,6 +246,13 @@ int main()
   test_lstm::test_lstm_different_input_size();
   test_lstm::test_lstm_state_evolution();
   test_lstm::test_lstm_no_layers();
+
+  // LSTM real-time safety tests (issue #218)
+  test_lstm_realtime_safe::test_lstm_process_single_layer_realtime_safe();
+  test_lstm_realtime_safe::test_lstm_process_multi_layer_realtime_safe();
+  test_lstm_realtime_safe::test_lstm_process_multichannel_realtime_safe();
+  test_lstm_realtime_safe::test_lstm_process_large_hidden_realtime_safe();
+  test_lstm_realtime_safe::test_lstm_process_consecutive_calls_realtime_safe();
 
   // Gating activations tests
   test_gating_activations::TestGatingActivation::test_basic_functionality();
@@ -308,6 +322,7 @@ int main()
   test_container::test_container_processes_audio();
   test_container::test_container_slimmable_selects_submodel();
   test_container::test_container_boundary_values();
+  test_container::test_container_slimmable_breakpoints();
   test_container::test_container_empty_submodels_throws();
   test_container::test_container_last_max_value_must_cover_one();
   test_container::test_container_unsorted_submodels_throws();
@@ -337,6 +352,7 @@ int main()
   test_slimmable_wavenet::test_boundary_values();
   test_slimmable_wavenet::test_default_is_max_size();
   test_slimmable_wavenet::test_ratio_mapping();
+  test_slimmable_wavenet::test_slimmable_breakpoints();
   test_slimmable_wavenet::test_from_json();
   test_slimmable_wavenet::test_wavenet_without_slimmable_loads_as_regular();
   test_slimmable_wavenet::test_unsupported_method_throws();
@@ -356,6 +372,8 @@ int main()
   test_a2_fast::test_detector_rejects_wrong_kernel_sizes();
   test_a2_fast::test_detector_rejects_wrong_activation();
   test_a2_fast::test_detector_rejects_gating();
+  test_a2_fast::test_detector_rejects_condition_dsp();
+  test_a2_fast::test_detector_rejects_legacy_gated();
   test_a2_fast::test_matches_generic_nano();
   test_a2_fast::test_matches_generic_medium();
   test_a2_fast::test_matches_generic_width5();
@@ -374,6 +392,8 @@ int main()
   test_a2_fast::test_parametric_matches_generic_width6();
   test_a2_fast::test_parametric_matches_generic_width7();
   test_a2_fast::test_parametric_matches_generic_standard();
+  test_a2_fast::test_prewarm_matches_generic_nano();
+  test_a2_fast::test_prewarm_matches_generic_standard();
   test_a2_fast::test_process_realtime_safe_nano();
   test_a2_fast::test_process_realtime_safe_medium();
   test_a2_fast::test_process_realtime_safe_width5();

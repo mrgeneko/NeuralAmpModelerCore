@@ -1,6 +1,6 @@
 #pragma once
 
-#include <vector> // [Fork] for GetAllowedSizes()
+#include <vector> // [Fork] for GetAllowedSizes(); also used by GetSlimmableSizeBreakpoints()
 
 namespace nam
 {
@@ -45,6 +45,16 @@ public:
   /// discrete size list (e.g. a purely continuous or single-array model).
   virtual std::vector<int> GetAllowedSizes() const { return {}; }
   // [Fork] END: GetAllowedSizes()
+
+  /// \brief Get normalized size-control values that divide the selectable slimmed models
+  /// \return Sorted internal breakpoints in (0.0, 1.0); 0.0 and 1.0 are implied bounds
+  // TODO: Make this abstract in the next breaking release.
+  // Upstream's normalized-breakpoint counterpart to GetAllowedSizes() above -- same
+  // underlying need (surface discrete size options to a host), different representation
+  // (0.0-1.0 breakpoints vs. raw channel counts). Kept alongside GetAllowedSizes() rather
+  // than merged: Fork's own code depends on the concrete channel-count values, and
+  // keeping this preserves source compatibility with anything upstream that calls it.
+  virtual std::vector<double> GetSlimmableSizeBreakpoints() const { return {}; }
 };
 
 } // namespace nam

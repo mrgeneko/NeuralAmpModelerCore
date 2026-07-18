@@ -251,6 +251,7 @@ std::unique_ptr<ModelConfig> create_parametric_config_generic(const nlohmann::js
     /*input_size=*/       1,
     /*condition_size=*/   1,                      // audio → input_mixin
     /*head_size=*/        1,                      // mono output
+    /*head_dilation=*/    1,                      // A2 topology is fixed; no head dilation
     /*head_kernel_size=*/ a2_fast::kHeadKernelSize,
     /*channels=*/         channels,
     /*bottleneck=*/       channels,               // no bottleneck reduction in A2

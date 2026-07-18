@@ -343,6 +343,27 @@ void test_detector_rejects_gating()
   assert(!nam::wavenet::a2_fast::is_a2_shape(cfg, nullptr));
 }
 
+// A condition DSP routes the conditioning signal through a nested model; the fast
+// path has no such stage. The nested model holds its own weights, so the parent
+// weight stream is unchanged and only the detector can catch this -- otherwise the
+// fast path would silently produce different audio than the generic WaveNet.
+void test_detector_rejects_condition_dsp()
+{
+  auto cfg = build_a2_config(8);
+  cfg["condition_dsp"] = {{"version", "0.5.0"}, {"architecture", "Linear"},
+                          {"config", nlohmann::json::object()}, {"weights", nlohmann::json::array()}};
+  assert(!nam::wavenet::a2_fast::is_a2_shape(cfg, nullptr));
+}
+
+// Legacy boolean `gated` (pre-gating_mode schema) maps to GATED layers in the
+// generic parser, which the fast path does not implement.
+void test_detector_rejects_legacy_gated()
+{
+  auto cfg = build_a2_config(3);
+  cfg["layers"][0]["gated"] = true;
+  assert(!nam::wavenet::a2_fast::is_a2_shape(cfg, nullptr));
+}
+
 void test_matches_generic(int channels)
 {
   const auto cfg = build_a2_config(channels);
@@ -523,6 +544,38 @@ void test_parametric_matches_generic_standard()
   test_parametric_matches_generic(8, 2);
 }
 // [Fork] END: parametric fast-path numerical verification
+
+// The fast path must report the same prewarm count as the generic WaveNet it
+// replaces; otherwise Reset() warms the two by a different number of samples and
+// their first post-Reset output can diverge (regression guard for the A2 prewarm
+// off-by-one). Builds both from the identical config via the same dual path as
+// test_matches_generic.
+void test_prewarm_matches_generic(int channels)
+{
+  const auto cfg = build_a2_config(channels);
+  const int weight_count = a2_weight_count(channels);
+  const auto weights = make_deterministic_weights(weight_count, /*seed=*/0xA2FA500u + channels);
+
+  auto fast_cfg = nam::wavenet::a2_fast::create_a2_fast_config(cfg, 48000.0);
+  std::vector<float> w_fast = weights;
+  auto fast_dsp = fast_cfg->create(std::move(w_fast), 48000.0);
+
+  auto generic_cfg = nam::wavenet::parse_config_json(cfg, 48000.0);
+  std::vector<float> w_gen = weights;
+  auto generic_dsp = generic_cfg.create(std::move(w_gen), 48000.0);
+
+  assert(fast_dsp->GetPrewarmSamples() == generic_dsp->GetPrewarmSamples());
+}
+
+void test_prewarm_matches_generic_nano()
+{
+  test_prewarm_matches_generic(3);
+}
+
+void test_prewarm_matches_generic_standard()
+{
+  test_prewarm_matches_generic(8);
+}
 
 // Real-time safety: once the DSP has been Reset (buffers sized, prewarmed),
 // subsequent process() calls must not allocate or free heap memory. Uses the

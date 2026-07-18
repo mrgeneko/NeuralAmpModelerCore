@@ -48,6 +48,7 @@ static nam::wavenet::LayerArrayParams make_tiny_params(const int num_params)
     /*input_size=*/       1,
     /*condition_size=*/   1,
     /*head_size=*/        1,
+    /*head_dilation=*/    1,
     /*head_kernel_size=*/ 1,
     /*channels=*/         1,
     /*bottleneck=*/       1,
@@ -641,7 +642,7 @@ void test_standard_wavenet_unaffected()
   const auto relu = nam::activations::ActivationConfig::simple(nam::activations::ActivationType::LeakyReLU);
   const nam::wavenet::_FiLMParams off{false, false};
   nam::wavenet::LayerArrayParams lap(
-    1, 1, 1, 1, 1, 1, {1}, {1}, {relu}, {nam::wavenet::GatingMode::NONE}, false, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, {1}, {1}, {relu}, {nam::wavenet::GatingMode::NONE}, false, 1, 1,
     nam::wavenet::Layer1x1Params{true, 1}, nam::wavenet::Head1x1Params{false, 1, 1}, {nam::activations::ActivationConfig{}},
     off, off, off, off, off, off, off, off);
 
