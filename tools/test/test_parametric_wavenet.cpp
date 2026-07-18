@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "NAM/get_dsp.h"
 #include "NAM/model_config.h"
 #include "NAM/wavenet/a2_fast.h"
 #include "NAM/wavenet/model.h"
@@ -428,6 +429,58 @@ void test_get_parameter_defs()
     assert(defs[i].max_val == 1.0f);
     assert(defs[i].default_val == 0.5f);
   }
+}
+
+// End-to-end: a "steps" field on a parameter in the raw JSON (as written when
+// exporting a discrete switch, e.g. a 3-way tone selector) must
+// reach DSPParamDef::steps via the real nam::get_dsp() load path -- exercising whichever
+// config path (generic ParametricWaveNetConfig or the A2 fast path) is actually compiled
+// in, unlike test_config_parse_valid_json() which only asserts field values on the
+// non-fast-path branch. A parameter with no "steps" key must default to 0 (continuous).
+//
+// condition_size is kept at 1 (matching the exact known-good weight count
+// test_render_parametric.cpp derived for this layers=3/condition_size=1 shape) -- the
+// FiLM net's weight count scales with num_params, so this can't be bumped to 2 params
+// without recomputing the total, and there's nothing to gain here from a second knob.
+static std::unique_ptr<nam::DSP> load_tiny_pwn_from_json(const nlohmann::json& parameter_entry)
+{
+  nlohmann::json cfg;
+  cfg["layers"] = 3;
+  cfg["head_scale"] = 1.0f;
+  cfg["parametric"]["condition_size"] = 1;
+  cfg["parametric"]["head_mode"] = "skip";
+  cfg["parametric"]["schema_version"] = 1;
+  cfg["parametric"]["parameters"] = {parameter_entry};
+
+  constexpr int kWeightCount = 2147;
+
+  nlohmann::json nam_file;
+  nam_file["version"] = "0.7.0";
+  nam_file["architecture"] = "ParametricWaveNet";
+  nam_file["config"] = cfg;
+  nam_file["weights"] = std::vector<float>(kWeightCount, 0.1f);
+  nam_file["sample_rate"] = 48000;
+
+  return nam::get_dsp(nam_file);
+}
+
+void test_get_parameter_defs_includes_steps()
+{
+  auto continuous = load_tiny_pwn_from_json(
+    {{"name", "drive"}, {"minimum", 0.0f}, {"maximum", 1.0f}, {"default", 0.5f}}); // no "steps" key
+  assert(continuous != nullptr);
+  auto continuous_defs = continuous->GetParameterDefs();
+  assert(continuous_defs.size() == 1);
+  assert(continuous_defs[0].name == "drive");
+  assert(continuous_defs[0].steps == 0);
+
+  auto discrete = load_tiny_pwn_from_json(
+    {{"name", "tone"}, {"minimum", 0.0f}, {"maximum", 1.0f}, {"default", 0.5f}, {"steps", 3}});
+  assert(discrete != nullptr);
+  auto discrete_defs = discrete->GetParameterDefs();
+  assert(discrete_defs.size() == 1);
+  assert(discrete_defs[0].name == "tone");
+  assert(discrete_defs[0].steps == 3);
 }
 
 // =============================================================================

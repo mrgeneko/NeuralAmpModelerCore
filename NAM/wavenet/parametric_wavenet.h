@@ -81,6 +81,9 @@ struct ParametricParam
   float min_val;
   float max_val;
   float default_val;
+  // Number of discrete positions for a switch-style control, or 0/1 for continuous.
+  // Mirrors DSPParamDef::steps (see dsp.h).
+  int steps = 0;
 };
 
 // [Fork] BEGIN: parametric schema guard

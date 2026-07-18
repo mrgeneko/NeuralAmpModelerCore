@@ -65,6 +65,9 @@ struct DSPParamDef
   float min_val    = 0.0f;
   float max_val    = 1.0f;
   float default_val = 0.5f;
+  // Number of discrete positions for a switch-style control (e.g. a 3-way tone selector),
+  // evenly spaced across [min_val, max_val]. 0 or 1 means continuous (a regular knob).
+  int steps = 0;
 };
 
 /// \brief Base class for all DSP models

@@ -434,6 +434,7 @@ int main()
   test_parametric_wavenet::test_construct_with_one_param();
   test_parametric_wavenet::test_construct_with_multiple_params();
   test_parametric_wavenet::test_get_parameter_defs();
+  test_parametric_wavenet::test_get_parameter_defs_includes_steps();
   test_parametric_wavenet::test_processes_finite_output();
   test_parametric_wavenet::test_processes_zero_input_finite();
   test_parametric_wavenet::test_different_buffer_sizes();

@@ -1931,7 +1931,7 @@ public:
     std::vector<DSPParamDef> result;
     result.reserve(_param_defs.size());
     for (const auto& p : _param_defs)
-      result.push_back({p.name, p.min_val, p.max_val, p.default_val});
+      result.push_back({p.name, p.min_val, p.max_val, p.default_val, p.steps});
     return result;
   }
   int GetNumParams() const override { return _num_params; }
@@ -3442,6 +3442,7 @@ std::unique_ptr<ModelConfig> create_parametric_a2_fast_config(const nlohmann::js
       pd.min_val     = p.value("min", p.value("minimum", 0.0f));
       pd.max_val     = p.value("max", p.value("maximum", 1.0f));
       pd.default_val = p.value("default", 0.5f);
+      pd.steps       = p.value("steps", 0);
       param_defs.push_back(std::move(pd));
     }
   }
