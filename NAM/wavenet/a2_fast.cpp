@@ -1,5 +1,11 @@
 #if defined(NAM_ENABLE_A2_FAST)
 
+  // MSVC only defines M_PI (a POSIX/GNU cmath extension, not standard C++) when this is
+  // defined before cmath's first inclusion anywhere in the translation unit -- must come
+  // before every #include below, since a2_fast.h/parametric_wavenet.h may pull in cmath
+  // transitively first.
+  #define _USE_MATH_DEFINES
+
   // Ring-buffer strategy:
   //   0 = linear memmove-rewind (variable worst-case latency, sporadic spikes)
   //   1 = pow2 + tail mirror (constant per-block work, branchless reads)
@@ -10,6 +16,7 @@
 
   #include "a2_fast.h"
   #include "parametric_wavenet.h"
+  #include "../compiler.h"
 
   #include <algorithm>
   #include <array>
@@ -2388,7 +2395,7 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       // Skip connections: accumulate this layer's post-activation into the head sum
       // (same site the static A2FastModel uses -- after FiLM+LeakyReLU, BEFORE the
       // l1x1 residual).
-      float* __restrict__ hsum = &_head_sum[static_cast<size_t>(f) * 3];
+      float* NAM_RESTRICT hsum = &_head_sum[static_cast<size_t>(f) * 3];
       hsum[0] += a0;
       hsum[1] += a1;
       hsum[2] += a2;
@@ -2494,7 +2501,7 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       // Skip connections: accumulate this layer's post-activation into the head sum
       // (same site the static A2FastModel uses -- after FiLM+LeakyReLU, BEFORE the
       // l1x1 residual).
-      float* __restrict__ hsum = &_head_sum[static_cast<size_t>(f) * 4];
+      float* NAM_RESTRICT hsum = &_head_sum[static_cast<size_t>(f) * 4];
       hsum[0] += a0;
       hsum[1] += a1;
       hsum[2] += a2;
@@ -2607,7 +2614,7 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       // Skip connections: accumulate this layer's post-activation into the head sum
       // (same site the static A2FastModel uses -- after FiLM+LeakyReLU, BEFORE the
       // l1x1 residual).
-      float* __restrict__ hsum = &_head_sum[static_cast<size_t>(f) * 5];
+      float* NAM_RESTRICT hsum = &_head_sum[static_cast<size_t>(f) * 5];
       hsum[0] += a0;
       hsum[1] += a1;
       hsum[2] += a2;
@@ -2732,7 +2739,7 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       // Skip connections: accumulate this layer's post-activation into the head sum
       // (same site the static A2FastModel uses -- after FiLM+LeakyReLU, BEFORE the
       // l1x1 residual).
-      float* __restrict__ hsum = &_head_sum[static_cast<size_t>(f) * 6];
+      float* NAM_RESTRICT hsum = &_head_sum[static_cast<size_t>(f) * 6];
       hsum[0] += a0;
       hsum[1] += a1;
       hsum[2] += a2;
@@ -2869,7 +2876,7 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       // Skip connections: accumulate this layer's post-activation into the head sum
       // (same site the static A2FastModel uses -- after FiLM+LeakyReLU, BEFORE the
       // l1x1 residual).
-      float* __restrict__ hsum = &_head_sum[static_cast<size_t>(f) * 7];
+      float* NAM_RESTRICT hsum = &_head_sum[static_cast<size_t>(f) * 7];
       hsum[0] += a0;
       hsum[1] += a1;
       hsum[2] += a2;
@@ -3019,7 +3026,7 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       // Skip connections: accumulate this layer's post-activation into the head sum
       // (same site the static A2FastModel uses -- after FiLM+LeakyReLU, BEFORE the
       // l1x1 residual).
-      float* __restrict__ hsum = &_head_sum[static_cast<size_t>(f) * 8];
+      float* NAM_RESTRICT hsum = &_head_sum[static_cast<size_t>(f) * 8];
       hsum[0] += a0;
       hsum[1] += a1;
       hsum[2] += a2;
