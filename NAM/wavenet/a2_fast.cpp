@@ -3442,8 +3442,16 @@ std::unique_ptr<ModelConfig> create_parametric_a2_fast_config(const nlohmann::js
   std::vector<ParametricParam> param_defs;
   if (param_block.contains("parameters"))
   {
-    for (const auto& p : param_block["parameters"])
+    // Guard the shape: iterating a JSON object (or an array of non-objects) yields VALUES, so
+    // p.value("name", ...) below would throw a raw json type_error and crash the host on load.
+    // Fail loudly with the same contract as the rest of this loader instead.
+    const auto& params_json = param_block["parameters"];
+    if (!params_json.is_array())
+      throw std::runtime_error("ParametricWaveNet: 'parameters' must be a JSON array of objects");
+    for (const auto& p : params_json)
     {
+      if (!p.is_object())
+        throw std::runtime_error("ParametricWaveNet: each 'parameters' entry must be a JSON object");
       ParametricParam pd;
       pd.name        = p.value("name", "");
       pd.min_val     = p.value("min", p.value("minimum", 0.0f));

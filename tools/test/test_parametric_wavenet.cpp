@@ -358,6 +358,42 @@ void test_config_parse_condition_size_too_large_throws()
   assert(threw);
 }
 
+// A malformed "parameters" -- an object, or an array of non-objects -- must be rejected with a
+// std::runtime_error, NOT leak a raw nlohmann type_error (which is uncaught and crashes the host).
+// Regression guard for the loader bug where iterating a JSON object yielded its numeric values and
+// p.value("name", ...) threw type_error.306.
+static bool parametric_config_throws_runtime_error(const nlohmann::json& parameters_value)
+{
+  nlohmann::json cfg;
+  cfg["layers"] = 3; // valid A2 shape -> exercises the fast path when compiled in
+  cfg["head_scale"] = 1.0f;
+  cfg["parametric"]["condition_size"] = 1;
+  cfg["parametric"]["head_mode"] = "skip";
+  cfg["parametric"]["schema_version"] = 1;
+  cfg["parametric"]["parameters"] = parameters_value;
+  try
+  {
+    nam::wavenet::create_parametric_config(cfg, 48000.0);
+  }
+  catch (const std::runtime_error&)
+  {
+    return true;
+  }
+  return false;
+}
+
+void test_config_parse_parameters_must_be_array_of_objects()
+{
+  // "parameters" as an object (the exact shape that crashed run_tests).
+  nlohmann::json as_object;
+  as_object["name"] = "drive";
+  as_object["minimum"] = 0.0f;
+  assert(parametric_config_throws_runtime_error(as_object));
+
+  // "parameters" as an array whose entries are not objects.
+  assert(parametric_config_throws_runtime_error(nlohmann::json::array({1, 2, 3})));
+}
+
 void test_config_parse_standard_channel_count()
 {
   // 8 (standard) must also parse correctly
@@ -450,7 +486,11 @@ static std::unique_ptr<nam::DSP> load_tiny_pwn_from_json(const nlohmann::json& p
   cfg["parametric"]["condition_size"] = 1;
   cfg["parametric"]["head_mode"] = "skip";
   cfg["parametric"]["schema_version"] = 1;
-  cfg["parametric"]["parameters"] = {parameter_entry};
+  // NB: json::array({...}), not {parameter_entry} -- the latter's brace-init collapses a single
+  // json object to the object itself, not a one-element array, so "parameters" would be an OBJECT.
+  // Iterating an object yields its VALUES (a number for the first entry), and the loader's
+  // p.value("name", ...) then throws type_error.306 ("cannot use value() with number").
+  cfg["parametric"]["parameters"] = nlohmann::json::array({parameter_entry});
 
   constexpr int kWeightCount = 2147;
 

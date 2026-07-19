@@ -429,6 +429,7 @@ int main()
   test_parametric_wavenet::test_config_parse_missing_parametric_block_throws();
   test_parametric_wavenet::test_config_parse_missing_condition_size_throws();
   test_parametric_wavenet::test_config_parse_condition_size_too_large_throws();
+  test_parametric_wavenet::test_config_parse_parameters_must_be_array_of_objects();
   test_parametric_wavenet::test_config_parse_standard_channel_count();
   test_parametric_wavenet::test_config_parse_param_defs_optional();
   test_parametric_wavenet::test_construct_with_one_param();
