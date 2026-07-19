@@ -49,11 +49,19 @@ public:
   {
     _cond_to_scale_shift.SetMaxBufferSize(maxBufferSize);
     _output.resize(get_input_dim(), maxBufferSize);
+    // [Fork] Preallocate the scale/shift cache buffers so Process() never allocates.
+    _scale_shift_broadcast.resize(_cond_to_scale_shift.get_out_channels(), maxBufferSize);
+    _cached_condition.resize(get_condition_dim());
+    _cache_valid = false;
   }
 
   /// \brief Set the parameters (weights) of this module
   /// \param weights Iterator to the weights vector. Will be advanced as weights are consumed.
-  void set_weights_(std::vector<float>::iterator& weights) { _cond_to_scale_shift.set_weights_(weights); }
+  void set_weights_(std::vector<float>::iterator& weights)
+  {
+    _cond_to_scale_shift.set_weights_(weights);
+    _cache_valid = false; // [Fork] new weights change scale/shift for any condition
+  }
 
   /// \brief Get the condition dimension
   /// \return Size of the conditioning input
@@ -82,8 +90,66 @@ public:
     assert(num_frames <= condition.cols());
     assert(num_frames <= _output.cols());
 
-    _cond_to_scale_shift.process_(condition, num_frames);
-    const auto& scale_shift = _cond_to_scale_shift.GetOutput();
+    // [Fork] Scale/shift cache ----------------------------------------------------------
+    // The condition->scale/shift Conv1x1 is the expensive part of FiLM. When the conditioning is
+    // constant across the block -- the ParametricWaveNet case, where knob values are broadcast
+    // identically to every frame -- that Conv1x1 yields the SAME column for all num_frames, so
+    // recomputing it per frame was pure waste. Detect that, compute the column ONCE, broadcast it,
+    // and skip even the single recompute when the condition is unchanged since the previous block.
+    // Time-varying conditioning (standard/audio FiLM) takes the original per-frame path, and the
+    // constant path is bit-identical to it (same Conv1x1 on the same column, replicated), so output
+    // is numerically unchanged either way.
+    const int cond_dim = (int)get_condition_dim();
+    bool cond_constant = true;
+    {
+      const float* NAM_RESTRICT c0 = condition.data();
+      const int cond_stride = (int)condition.outerStride();
+      for (int f = 1; f < num_frames && cond_constant; f++)
+      {
+        const float* __restrict cf = c0 + f * cond_stride;
+        for (int r = 0; r < cond_dim; r++)
+          if (cf[r] != c0[r])
+          {
+            cond_constant = false;
+            break;
+          }
+      }
+    }
+
+    const Eigen::MatrixXf* scale_shift_src;
+    if (cond_constant)
+    {
+      bool hit = _cache_valid;
+      if (hit)
+      {
+        const float* NAM_RESTRICT c0 = condition.data();
+        for (int r = 0; r < cond_dim; r++)
+          if (c0[r] != _cached_condition[r])
+          {
+            hit = false;
+            break;
+          }
+      }
+      if (!hit)
+      {
+        _cond_to_scale_shift.process_(condition.leftCols(1), 1); // one column, not num_frames
+        // Broadcast the single column so the affine below (which reads one column per frame) is
+        // unchanged; every column is bit-identical to what the per-frame Conv1x1 would produce.
+        _scale_shift_broadcast.colwise() = _cond_to_scale_shift.GetOutput().col(0);
+        const float* NAM_RESTRICT c0 = condition.data();
+        for (int r = 0; r < cond_dim; r++)
+          _cached_condition[r] = c0[r];
+        _cache_valid = true;
+      }
+      scale_shift_src = &_scale_shift_broadcast;
+    }
+    else
+    {
+      _cond_to_scale_shift.process_(condition, num_frames);
+      _cache_valid = false; // block's scale/shift vary per frame; nothing single to cache
+      scale_shift_src = &_cond_to_scale_shift.GetOutput();
+    }
+    const auto& scale_shift = *scale_shift_src;
 
 #ifdef NAM_USE_INLINE_GEMM
     // Optimized inline FiLM operation
@@ -207,5 +273,11 @@ private:
   Conv1x1 _cond_to_scale_shift; // condition_dim -> (shift ? 2 : 1) * input_dim
   Eigen::MatrixXf _output; // input_dim x maxBufferSize
   bool _do_shift;
+
+  // [Fork] Scale/shift cache (see Process). Built once per distinct constant condition and
+  // reused across blocks until the condition or the weights change.
+  Eigen::MatrixXf _scale_shift_broadcast; // (shift?2:1)*input_dim x maxBufferSize; each col identical
+  Eigen::VectorXf _cached_condition; // condition_dim; the condition the cache was built for
+  bool _cache_valid = false;
 };
 } // namespace nam
