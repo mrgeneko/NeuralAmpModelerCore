@@ -26,6 +26,7 @@
 
 #include "NAM/dsp.h"
 #include "NAM/get_dsp.h"
+#include "NAM/slimmable.h"
 #include "wav.h"
 
 namespace
@@ -61,6 +62,7 @@ int main(int argc, char* argv[])
   std::vector<std::string> pos;
   std::vector<float> knobs;
   int block = 64;
+  double size = -1.0; // -1 = leave at default (widest tier)
 
   for (int i = 1; i < argc; i++)
   {
@@ -76,6 +78,10 @@ int main(int argc, char* argv[])
     {
       block = std::atoi(argv[++i]);
     }
+    else if (a == "--size" && i + 1 < argc)
+    {
+      size = std::strtod(argv[++i], nullptr);
+    }
     else
     {
       pos.push_back(a);
@@ -85,7 +91,8 @@ int main(int argc, char* argv[])
   if (pos.size() < 3)
   {
     std::cerr << "Usage: render_parametric <model.param.nam> <in.wav> <out.wav> "
-                 "--knobs v1,v2,... [--block N]\n";
+                 "--knobs v1,v2,... [--block N] [--size RATIO]\n"
+                 "  --size selects the slimmable tier (0..1); omitted = widest tier.\n";
     return 1;
   }
 
@@ -123,6 +130,23 @@ int main(int argc, char* argv[])
   const double rate = expected > 0 ? expected : sr;
 
   model->Reset(rate, block);
+
+  if (size >= 0.0)
+  {
+    auto* slim = dynamic_cast<nam::SlimmableModel*>(model.get());
+    if (!slim)
+    {
+      std::cerr << "Error: --size given but model is not slimmable\n";
+      return 1;
+    }
+    slim->SetSlimmableSize(size);
+    const auto sizes = slim->GetAllowedSizes();
+    std::cerr << "slimmable size ratio=" << size << "  allowed sizes=[";
+    for (size_t k = 0; k < sizes.size(); ++k)
+      std::cerr << sizes[k] << (k + 1 < sizes.size() ? "," : "");
+    std::cerr << "]\n";
+  }
+
   model->SetKnobValues(knobs);
 
   std::vector<NAM_SAMPLE> in(block), out(block);
