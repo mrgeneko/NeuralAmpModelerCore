@@ -212,11 +212,7 @@ std::unique_ptr<DSP> get_dsp(const std::filesystem::path config_filename, dspDat
   }
   else
   {
-    if (!std::filesystem::exists(config_filename))
-      throw std::runtime_error("Config file doesn't exist!\n");
-    std::ifstream i(config_filename);
-    nlohmann::json j;
-    i >> j;
+    const auto j = validate_nam_file(config_filename);
     populate_dsp_data(j, returnedConfig);
   }
 

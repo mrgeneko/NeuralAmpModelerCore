@@ -1,11 +1,11 @@
 #pragma once
 
-#include <fstream>
 #include <memory>
 #include <optional>
 #include <vector>
 
 #include "dsp.h"
+#include "nam_file.h"
 
 namespace nam
 {
@@ -86,6 +86,7 @@ struct DspLoadOptions
 /// Stereo files create one-input, two-output models; each WAV channel supplies its output impulse response.
 /// The WAV sample rate is retained; Linear::Reset handles resampling. Returned configurations can be reloaded.
 /// \throws std::runtime_error If a WAV file is invalid, empty, has more than two channels, or uses an unsupported format
+/// \throws NamFileValidationError If a .nam file cannot be read or does not contain a minimally valid configuration
 std::unique_ptr<DSP> get_dsp(const std::filesystem::path config_filename, DspLoadOptions options = DspLoadOptions());
 
 /// \brief Get NAM from a provided configuration struct
@@ -106,6 +107,7 @@ std::unique_ptr<DSP> get_dsp(dspData& conf, DspLoadOptions options = DspLoadOpti
 /// Stereo files create one-input, two-output models; each WAV channel supplies its output impulse response.
 /// The WAV sample rate is retained; Linear::Reset handles resampling. Returned configurations can be reloaded.
 /// \throws std::runtime_error If a WAV file is invalid, empty, has more than two channels, or uses an unsupported format
+/// \throws NamFileValidationError If a .nam file cannot be read or does not contain a minimally valid configuration
 std::unique_ptr<DSP> get_dsp(const std::filesystem::path config_filename, dspData& returnedConfig,
                              DspLoadOptions options = DspLoadOptions());
 
