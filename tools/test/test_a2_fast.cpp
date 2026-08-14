@@ -322,6 +322,40 @@ void test_parametric_detector_matches_supported_widths()
   assert(!nam::wavenet::a2_fast::is_parametric_a2_shape(cfg, nullptr, nullptr));
 }
 
+// [Fork] LoRA exclusion (Phase 4 of the LoRA plan): this fast path has zero LoRA support
+// and never will -- is_parametric_a2_shape() must reject any LoRA-tagged config so it
+// falls through to the slower-but-correct generic path instead of either crashing on a
+// weight-count mismatch or, worse, silently misassigning every downstream layer's weights.
+// See a2_fast.cpp's is_parametric_a2_shape() for the "type" field check this exercises.
+void test_parametric_detector_excludes_lora()
+{
+  // Otherwise-valid shape (channels=3, a supported fast-path width), but tagged "film+lora".
+  nlohmann::json cfg;
+  cfg["layers"] = 3;
+  cfg["head_scale"] = 1.0f;
+  cfg["parametric"]["condition_size"] = 1;
+  cfg["parametric"]["type"] = "film+lora";
+  assert(!nam::wavenet::a2_fast::is_parametric_a2_shape(cfg, nullptr, nullptr));
+}
+
+void test_parametric_detector_accepts_explicit_film_type()
+{
+  // "type":"film" (what every LoRA-off export now declares explicitly) must still be
+  // accepted -- the gate is an exclusion for "film+lora" (or any other non-"film" value),
+  // not a requirement that the key be absent.
+  for (int channels : {3, 4, 5, 6, 7, 8})
+  {
+    nlohmann::json cfg;
+    cfg["layers"] = channels;
+    cfg["head_scale"] = 1.0f;
+    cfg["parametric"]["condition_size"] = 1;
+    cfg["parametric"]["type"] = "film";
+    int ch = 0, np = 0;
+    assert(nam::wavenet::a2_fast::is_parametric_a2_shape(cfg, &ch, &np));
+    assert(ch == channels);
+  }
+}
+
 void test_detector_rejects_wrong_kernel_sizes()
 {
   auto cfg = build_a2_config(8);

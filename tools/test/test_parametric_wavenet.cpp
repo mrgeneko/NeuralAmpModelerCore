@@ -238,6 +238,47 @@ void test_skip_model_loads_and_takes_fast_path()
 #endif
 }
 
+// [Fork] Phase 4 of the LoRA plan: end-to-end proof that a LoRA-tagged model is dispatched
+// to the generic (correct) path, not just that is_parametric_a2_shape() itself returns
+// false in isolation -- a gate-only unit test would miss a wiring bug where the gate's
+// result is computed but never actually consulted at the create_parametric_config() call
+// site. dynamic_cast<ParametricWaveNetConfig*> != nullptr means the GENERIC path was taken
+// (mirrors the existing convention in test_skip_model_loads_and_takes_fast_path above).
+void test_lora_tagged_model_takes_generic_path()
+{
+  nlohmann::json cfg;
+  cfg["layers"] = 3; // otherwise a supported fast-path width
+  cfg["head_scale"] = 1.0f;
+  cfg["parametric"]["condition_size"] = 1;
+  cfg["parametric"]["head_mode"] = "skip";
+  cfg["parametric"]["schema_version"] = 2;
+  cfg["parametric"]["type"] = "film+lora";
+  cfg["parametric"]["lora"]["rank"] = 2;
+
+  auto config = nam::wavenet::create_parametric_config(cfg, 48000.0);
+  assert(config != nullptr);
+  assert(dynamic_cast<nam::wavenet::ParametricWaveNetConfig*>(config.get()) != nullptr);
+}
+
+// Regression: an explicit "type":"film" (what every LoRA-off export declares once the
+// Python side started writing this field) must still take the fast path when
+// NAM_ENABLE_A2_FAST is compiled in -- the gate excludes "film+lora", not "type" itself.
+void test_explicit_film_type_still_takes_fast_path()
+{
+  nlohmann::json cfg;
+  cfg["layers"] = 3;
+  cfg["head_scale"] = 1.0f;
+  cfg["parametric"]["condition_size"] = 1;
+  cfg["parametric"]["head_mode"] = "skip";
+  cfg["parametric"]["type"] = "film";
+
+  auto config = nam::wavenet::create_parametric_config(cfg, 48000.0);
+  assert(config != nullptr);
+#if defined(NAM_ENABLE_A2_FAST)
+  assert(dynamic_cast<nam::wavenet::ParametricWaveNetConfig*>(config.get()) == nullptr);
+#endif
+}
+
 void test_config_parse_missing_layers_throws()
 {
   nlohmann::json cfg;

@@ -387,6 +387,8 @@ int main()
   test_a2_fast::test_detector_matches_width7();
   test_a2_fast::test_detector_matches_standard();
   test_a2_fast::test_parametric_detector_matches_supported_widths();
+  test_a2_fast::test_parametric_detector_excludes_lora();
+  test_a2_fast::test_parametric_detector_accepts_explicit_film_type();
   test_a2_fast::test_detector_accepts_nonstandard_head_scale();
   test_a2_fast::test_detector_rejects_wrong_channels();
   test_a2_fast::test_detector_rejects_wrong_kernel_sizes();
@@ -436,6 +438,8 @@ int main()
   test_parametric_wavenet::test_unknown_head_mode_is_rejected();
   test_parametric_wavenet::test_newer_schema_version_is_rejected();
   test_parametric_wavenet::test_skip_model_loads_and_takes_fast_path();
+  test_parametric_wavenet::test_lora_tagged_model_takes_generic_path();
+  test_parametric_wavenet::test_explicit_film_type_still_takes_fast_path();
   test_parametric_wavenet::test_config_parse_valid_json();
   test_parametric_wavenet::test_config_parse_missing_layers_throws();
   test_parametric_wavenet::test_config_parse_invalid_channel_count_throws();
