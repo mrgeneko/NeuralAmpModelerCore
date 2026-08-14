@@ -9,6 +9,8 @@
 #include "test/test_dsp.cpp"
 #include "test/test_film.cpp"
 #include "test/test_film_realtime_safe.cpp"
+#include "test/test_lora.cpp"
+#include "test/test_lora_realtime_safe.cpp"
 #include "test/test_fast_lut.cpp"
 #include "test/test_get_dsp.cpp"
 #include "test/test_ring_buffer.cpp"
@@ -172,6 +174,19 @@ int main()
   test_film_realtime_safe::test_film_process_partial_frames_realtime_safe();
   test_film_realtime_safe::test_film_process_varying_dimensions_realtime_safe();
   test_film_realtime_safe::test_film_process_consecutive_calls_realtime_safe();
+
+  test_lora::test_set_max_buffer_size();
+  test_lora::test_process_matches_hand_computed_matmul();
+  test_lora::test_process_inplace_adds_to_input();
+  test_lora::test_process_partial_frames();
+  test_lora::test_zero_weights_produce_zero_output();
+  test_lora::test_process_varying_condition_matches_per_frame_recompute();
+
+  test_lora_realtime_safe::test_lora_process_constant_condition_realtime_safe();
+  test_lora_realtime_safe::test_lora_process_varying_condition_realtime_safe();
+  test_lora_realtime_safe::test_lora_process_inplace_realtime_safe();
+  test_lora_realtime_safe::test_lora_process_partial_frames_realtime_safe();
+  test_lora_realtime_safe::test_lora_process_consecutive_calls_realtime_safe();
 
   test_wavenet::test_layer::test_gated();
   test_wavenet::test_layer::test_layer_getters();
@@ -432,6 +447,15 @@ int main()
   test_parametric_wavenet::test_config_parse_parameters_must_be_array_of_objects();
   test_parametric_wavenet::test_config_parse_standard_channel_count();
   test_parametric_wavenet::test_config_parse_param_defs_optional();
+
+  test_parametric_wavenet::test_config_parse_lora_block_parses();
+  test_parametric_wavenet::test_config_parse_lora_absent_is_inactive();
+  test_parametric_wavenet::test_config_parse_lora_missing_rank_throws();
+  test_parametric_wavenet::test_config_parse_lora_zero_rank_throws();
+  test_parametric_wavenet::test_construct_and_process_with_lora();
+  test_parametric_wavenet::test_lora_active_output_differs_from_lora_inactive();
+  test_parametric_wavenet::test_lora_weight_count_matches_layout();
+
   test_parametric_wavenet::test_construct_with_one_param();
   test_parametric_wavenet::test_construct_with_multiple_params();
   test_parametric_wavenet::test_get_parameter_defs();

@@ -39,10 +39,18 @@ namespace test_parametric_wavenet
 //
 // This keeps the weight count small and the math easy to reason about.
 
-static nam::wavenet::LayerArrayParams make_tiny_params(const int num_params)
+// num_layers defaults to 1 (the original topology every pre-existing test here relies on).
+// LoRA-differentiation tests need >= 2: LoRA's delta lands on _output_next_layer (the
+// residual feeding the NEXT layer -- see model.cpp's Layer::Process GatingMode::NONE
+// branch), which a 1-layer array never reads (the final output comes from the head-sum
+// path, which LoRA deliberately does not touch, matching Python's
+// `x + l1x1(post_act) + lora(post_act, cond)`).
+static nam::wavenet::LayerArrayParams make_tiny_params(const int num_params, const int lora_rank = 0,
+                                                        const int num_layers = 1)
 {
   const nam::wavenet::_FiLMParams off{false, false};
   const nam::wavenet::_FiLMParams activation_pre_film{true, true, 1}; // shift=true → scale+shift
+  const nam::wavenet::_LoRAParams lora{lora_rank > 0, lora_rank};
 
   const auto leaky = nam::activations::ActivationConfig::simple(nam::activations::ActivationType::LeakyReLU);
 
@@ -54,46 +62,55 @@ static nam::wavenet::LayerArrayParams make_tiny_params(const int num_params)
     /*head_kernel_size=*/ 1,
     /*channels=*/         1,
     /*bottleneck=*/       1,
-    /*kernel_sizes=*/     {1},
-    /*dilations=*/        {1},
-    /*activation_configs=*/ {leaky},
-    /*gating_modes=*/     {nam::wavenet::GatingMode::NONE},
+    /*kernel_sizes=*/     std::vector<int>(num_layers, 1),
+    /*dilations=*/        std::vector<int>(num_layers, 1),
+    /*activation_configs=*/ std::vector<nam::activations::ActivationConfig>(num_layers, leaky),
+    /*gating_modes=*/     std::vector<nam::wavenet::GatingMode>(num_layers, nam::wavenet::GatingMode::NONE),
     /*head_bias=*/        false,
     /*groups_input=*/     1,
     /*groups_input_mixin=*/ 1,
     nam::wavenet::Layer1x1Params{true, 1},
     nam::wavenet::Head1x1Params{false, 1, 1},
-    /*secondary_activation_configs=*/ {nam::activations::ActivationConfig{}},
+    /*secondary_activation_configs=*/ std::vector<nam::activations::ActivationConfig>(
+      num_layers, nam::activations::ActivationConfig{}),
     off, off, off, off,
     activation_pre_film, // THE active FiLM; condition_dim = num_params
     off, off, off,
-    /*film_condition_size=*/ num_params);
+    /*film_condition_size=*/ num_params,
+    lora); // optional layer1x1 LoRA (default-inactive)
 }
 
-// Weight count for the tiny config above.
+// Weight count for the tiny config above (per layer, times num_layers).
 //
 // Layout (Layer::set_weights_ order):
 //   rechannel    : Conv1x1(1, 1, no bias)          = 1
-//   layer[0]     : conv  Conv1D(1,1,K=1,bias)      = 1*1*1 + 1 = 2
+//   per layer    : conv  Conv1D(1,1,K=1,bias)      = 1*1*1 + 1 = 2
 //                  mixin Conv1x1(1,1,no bias)       = 1
 //                  l1x1  Conv1x1(1,1,bias)          = 1*1 + 1 = 2
 //                  film  Conv1x1(np,2,bias=true)    = np*2 + 2
 //   head_rechannel: Conv1D(1,1,K=1,no bias)         = 1
 //   head_scale:                                      = 1
-static int count_tiny_weights(const int num_params)
+//   [optional, per layer] lora  net_A Conv1x1(np,rank,bias) + net_B Conv1x1(np,rank,bias)
+//              [channels=1 here, so channels*rank == rank*channels == rank]
+//                     = 2 * (rank*np + rank)
+static int count_tiny_weights(const int num_params, const int lora_rank = 0, const int num_layers = 1)
 {
   const int film_weights = num_params * 2 + 2; // Conv1x1(np, 2*1=2, bias)
-  return 1 + (2 + 1 + 2 + film_weights) + 1 + 1;
+  const int lora_weights = lora_rank > 0 ? 2 * (lora_rank * num_params + lora_rank) : 0;
+  const int per_layer = 2 + 1 + 2 + film_weights + lora_weights;
+  return 1 + per_layer * num_layers + 1 + 1;
 }
 
 static std::unique_ptr<nam::wavenet::ParametricWaveNet> make_tiny_pwn(const int num_params,
-                                                                       const float weight_value = 0.5f)
+                                                                       const float weight_value = 0.5f,
+                                                                       const int lora_rank = 0,
+                                                                       const int num_layers = 1)
 {
-  const int n = count_tiny_weights(num_params);
+  const int n = count_tiny_weights(num_params, lora_rank, num_layers);
   std::vector<float> weights(n, weight_value);
 
   std::vector<nam::wavenet::LayerArrayParams> laps;
-  laps.push_back(make_tiny_params(num_params));
+  laps.push_back(make_tiny_params(num_params, lora_rank, num_layers));
 
   std::vector<nam::wavenet::ParametricParam> param_defs;
   for (int i = 0; i < num_params; ++i)
@@ -432,6 +449,145 @@ void test_config_parse_param_defs_optional()
   assert(pwn_cfg->num_params == 3);
   assert(pwn_cfg->param_defs.empty()); // no defs provided
 #endif
+}
+
+// =============================================================================
+// 1b. LoRA (config["parametric"]["lora"], schema_version 2)
+// =============================================================================
+//
+// Uses an intermediate (non-3/8) channel count so these always exercise the generic
+// construction path directly -- see test_config_parse_intermediate_channel_count_does_not_throw
+// for the same reasoning. This is deliberate, not incidental: as of this phase,
+// is_parametric_a2_shape() (a2_fast.cpp) has no awareness of the "lora" block yet -- that
+// exclusion gate is Phase 4 -- so a channels=3/8 LoRA config here would risk silently
+// hitting the fast path's unrelated weight layout instead of exercising this code.
+
+void test_config_parse_lora_block_parses()
+{
+  nlohmann::json cfg;
+  cfg["layers"] = 4;
+  cfg["head_scale"] = 1.0f;
+  cfg["parametric"]["condition_size"] = 2;
+  cfg["parametric"]["head_mode"] = "skip";
+  cfg["parametric"]["schema_version"] = 2;
+  cfg["parametric"]["lora"]["rank"] = 3;
+
+  auto config = nam::wavenet::create_parametric_config_generic(cfg, 48000.0);
+  auto* pwn_cfg = dynamic_cast<nam::wavenet::ParametricWaveNetConfig*>(config.get());
+  assert(pwn_cfg != nullptr);
+  assert(pwn_cfg->layer_array_params.size() == 1);
+  assert(pwn_cfg->layer_array_params[0].layer1x1_lora_params.active);
+  assert(pwn_cfg->layer_array_params[0].layer1x1_lora_params.rank == 3);
+}
+
+void test_config_parse_lora_absent_is_inactive()
+{
+  // Regression: every export before this schema bump has no "lora" key at all -- must
+  // still parse with layer1x1_lora_params default-inactive.
+  nlohmann::json cfg;
+  cfg["layers"] = 4;
+  cfg["head_scale"] = 1.0f;
+  cfg["parametric"]["condition_size"] = 2;
+  cfg["parametric"]["head_mode"] = "skip";
+  cfg["parametric"]["schema_version"] = 1;
+
+  auto config = nam::wavenet::create_parametric_config_generic(cfg, 48000.0);
+  auto* pwn_cfg = dynamic_cast<nam::wavenet::ParametricWaveNetConfig*>(config.get());
+  assert(pwn_cfg != nullptr);
+  assert(!pwn_cfg->layer_array_params[0].layer1x1_lora_params.active);
+}
+
+// Channels 3-8 ALL currently take the fast path (is_parametric_a2_shape widened to accept
+// the whole 3-8 range, not just 3/8 -- see a2_fast.cpp), so rejects() (which dispatches
+// through create_parametric_config) would never reach this phase's new generic-path
+// parsing code for ANY channel count. Must call create_parametric_config_generic directly,
+// like the other LoRA parse tests above -- caught by this test itself failing otherwise.
+static bool generic_rejects(const nlohmann::json& cfg)
+{
+  try
+  {
+    nam::wavenet::create_parametric_config_generic(cfg, 48000.0);
+  }
+  catch (const std::runtime_error&)
+  {
+    return true;
+  }
+  return false;
+}
+
+void test_config_parse_lora_missing_rank_throws()
+{
+  nlohmann::json cfg;
+  cfg["layers"] = 4;
+  cfg["head_scale"] = 1.0f;
+  cfg["parametric"]["condition_size"] = 1;
+  cfg["parametric"]["head_mode"] = "skip";
+  cfg["parametric"]["lora"] = nlohmann::json::object(); // no "rank"
+
+  assert(generic_rejects(cfg));
+}
+
+void test_config_parse_lora_zero_rank_throws()
+{
+  nlohmann::json cfg;
+  cfg["layers"] = 4;
+  cfg["head_scale"] = 1.0f;
+  cfg["parametric"]["condition_size"] = 1;
+  cfg["parametric"]["head_mode"] = "skip";
+  cfg["parametric"]["lora"]["rank"] = 0;
+
+  assert(generic_rejects(cfg));
+}
+
+void test_construct_and_process_with_lora()
+{
+  auto pwn = make_tiny_pwn(/*num_params=*/2, /*weight_value=*/0.3f, /*lora_rank=*/2);
+  assert(pwn != nullptr);
+  const auto out = process_and_capture(pwn.get(), 64, 0.4f);
+  for (auto v : out)
+    assert(std::isfinite(v));
+}
+
+// End-to-end proof the LoRA wiring added to detail.h/model.cpp actually executes and
+// affects output -- not just that config parsing accepts the block. Same weight VALUE
+// fills both models (identical conv/mixin/l1x1/FiLM behavior); only the presence of the
+// extra lora.net_A/net_B weights differs, which must change the output since they're
+// non-zero.
+void test_lora_active_output_differs_from_lora_inactive()
+{
+  const int num_params = 2;
+  // 2 layers: LoRA's delta lands on _output_next_layer, which only the SECOND layer's
+  // input actually reads -- see make_tiny_params' num_layers doc comment above.
+  const int num_layers = 2;
+  auto pwn_no_lora = make_tiny_pwn(num_params, 0.3f, /*lora_rank=*/0, num_layers);
+  auto pwn_lora = make_tiny_pwn(num_params, 0.3f, /*lora_rank=*/2, num_layers);
+
+  const int buffer_size = 64;
+  const auto out_no_lora = process_and_capture(pwn_no_lora.get(), buffer_size, 0.4f);
+  const auto out_lora = process_and_capture(pwn_lora.get(), buffer_size, 0.4f);
+
+  bool any_different = false;
+  for (int i = 0; i < buffer_size; ++i)
+    if (std::abs(out_no_lora[i] - out_lora[i]) > 1e-6f) { any_different = true; break; }
+  assert(any_different);
+}
+
+// Regression guard on the WEIGHT LAYOUT comment in parametric_wavenet.h: the lora branch
+// must be consumed at exactly the right position (right after activation_pre_film's
+// weights) for a range of rank/param combinations -- an off-by-one here would either
+// crash (iterator exhausted mid-construction) or leave weights misaligned.
+void test_lora_weight_count_matches_layout()
+{
+  for (int lora_rank : {1, 2, 4})
+    for (int num_params : {1, 3})
+    {
+      auto pwn = make_tiny_pwn(num_params, 0.2f, lora_rank);
+      assert(pwn != nullptr);
+      assert(pwn->GetNumParams() == num_params);
+      const auto out = process_and_capture(pwn.get(), 32, 0.25f);
+      for (auto v : out)
+        assert(std::isfinite(v));
+    }
 }
 
 // =============================================================================
