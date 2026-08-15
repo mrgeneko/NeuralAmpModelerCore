@@ -719,7 +719,7 @@ void test_parametric_knob_smoothing_converges()
 
   // Enough buffers for (1 - coeff)^n to be negligible, derived from the same formula
   // SetMaxBufferSize() uses (a2_fast.cpp ~line 2205), plus a healthy margin.
-  const float smoothTimeSamples = static_cast<float>(sample_rate) * 0.020f;
+  const float smoothTimeSamples = static_cast<float>(sample_rate) * 0.100f;
   const float coeff = 1.0f - std::exp(-static_cast<float>(block) / smoothTimeSamples);
   const int n_converge = static_cast<int>(std::ceil(std::log(1e-6) / std::log(1.0 - coeff))) + 20;
   const auto out_settled = run_buffers(*dsp_a, n_converge); // MANY buffers later
@@ -763,7 +763,7 @@ void test_parametric_knob_smoothing_converges()
 // Reset() last sized buffers for, it calls SetMaxBufferSize(num_frames) directly, without an
 // intervening Reset(). Bug: SetMaxBufferSize() didn't recompute _knob_smooth_coeff, so it stayed
 // calibrated for whatever (smaller) buffer size Reset() was last called with -- meaning a knob
-// jump would ramp far slower than the intended ~20ms once the buffer size grew, since each now-
+// jump would ramp far slower than the intended ~100ms once the buffer size grew, since each now-
 // larger buffer covers more wall-clock time but still closes only the smaller-buffer-sized
 // fraction of the gap.
 //
@@ -814,7 +814,7 @@ void test_parametric_knob_smoothing_recalibrates_after_implicit_resize()
   // Buffers needed for (1 - coeff)^n to be negligible AT large_block -- the size that matters
   // once the implicit resize has happened. Uses the *correct* formula (as if recomputed for
   // large_block), which is exactly what should now be in effect after the fix.
-  const float smoothTimeSamples = static_cast<float>(sample_rate) * 0.020f;
+  const float smoothTimeSamples = static_cast<float>(sample_rate) * 0.100f;
   const float coeff = 1.0f - std::exp(-static_cast<float>(large_block) / smoothTimeSamples);
   const int n_converge = static_cast<int>(std::ceil(std::log(1e-6) / std::log(1.0 - coeff))) + 20;
   const auto out_settled = run_buffers(*dsp_a, large_block, n_converge);

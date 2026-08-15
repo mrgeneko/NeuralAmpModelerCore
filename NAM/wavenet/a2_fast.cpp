@@ -2202,7 +2202,10 @@ void ParametricA2FastModel<Channels>::SetMaxBufferSize(int maxBufferSize)
   // false, mExternalSampleRate at its -1.0 default); the 0.3f member-initializer default handles that case.
   if (mHaveExternalSampleRate)
   {
-    const float smoothTimeSamples = static_cast<float>(mExternalSampleRate) * 0.020f;
+    // 100ms (was 20ms): the FiLM shift term's DC offset is knob-position-dependent, so any
+    // knob move produces a transient through the downstream DC blocker -- slower smoothing
+    // reduces that transient roughly proportionally, at the cost of knob lag.
+    const float smoothTimeSamples = static_cast<float>(mExternalSampleRate) * 0.100f;
     _knob_smooth_coeff = 1.0f - std::exp(-static_cast<float>(maxBufferSize) / smoothTimeSamples);
   }
 
@@ -2246,7 +2249,7 @@ void ParametricA2FastModel<Channels>::Reset(double sampleRate, int maxBufferSize
   _dc_alpha = 1.0f - 2.0f * static_cast<float>(M_PI) * 20.0f / static_cast<float>(sampleRate);
   _dc_x_prev = 0.0f;
   _dc_y_prev = 0.0f;
-  // _knob_smooth_coeff (20ms one-pole time constant) is recomputed inside SetMaxBufferSize(),
+  // _knob_smooth_coeff (100ms one-pole time constant) is recomputed inside SetMaxBufferSize(),
   // which DSP::Reset() below calls after storing sampleRate into mExternalSampleRate -- see the
   // comment there for why it isn't computed here directly.
   DSP::Reset(sampleRate, maxBufferSize); // calls SetMaxBufferSize then prewarm()

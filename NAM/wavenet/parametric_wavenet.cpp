@@ -82,7 +82,10 @@ void ParametricWaveNet::Reset(const double sampleRate, const int maxBufferSize)
   _dc_x_prev = 0.0f;
   _dc_y_prev = 0.0f;
   // [Fork] Per-buffer smooth coeff: 1 - exp(-bufferSize / (sampleRate * smoothTime)).
-  const float smoothTimeSamples = (float)sampleRate * 0.020f;
+  // 100ms (was 20ms): the FiLM shift term's DC offset is knob-position-dependent, so any
+  // knob move produces a transient through the downstream DC blocker above -- slower
+  // smoothing reduces that transient roughly proportionally, at the cost of knob lag.
+  const float smoothTimeSamples = (float)sampleRate * 0.100f;
   _knob_smooth_coeff = 1.0f - std::exp(-(float)maxBufferSize / smoothTimeSamples);
 
   WaveNet::Reset(sampleRate, maxBufferSize); // prewarm() runs here; blocker converges
