@@ -718,8 +718,8 @@ void test_parametric_knob_smoothing_converges()
   const auto out_immediate = run_buffers(*dsp_a, 1); // ONE buffer immediately after the jump
 
   // Enough buffers for (1 - coeff)^n to be negligible, derived from the same formula
-  // Reset() uses (a2_fast.cpp ~line 2231-2232), plus a healthy margin.
-  const float smoothTimeSamples = static_cast<float>(sample_rate) * 0.020f;
+  // SetMaxBufferSize() uses (a2_fast.cpp ~line 2205), plus a healthy margin.
+  const float smoothTimeSamples = static_cast<float>(sample_rate) * 0.100f;
   const float coeff = 1.0f - std::exp(-static_cast<float>(block) / smoothTimeSamples);
   const int n_converge = static_cast<int>(std::ceil(std::log(1e-6) / std::log(1.0 - coeff))) + 20;
   const auto out_settled = run_buffers(*dsp_a, n_converge); // MANY buffers later
@@ -756,6 +756,101 @@ void test_parametric_knob_smoothing_converges()
   assert(diff_settled < 1e-5);
 }
 // [Fork] END: per-buffer knob smoothing convergence test
+
+// [Fork] BEGIN: knob smoothing recalibrates after an implicit (Reset()-less) buffer-size grow.
+//
+// process() has a defensive fallback (a2_fast.cpp ~line 3146): if num_frames ever exceeds what
+// Reset() last sized buffers for, it calls SetMaxBufferSize(num_frames) directly, without an
+// intervening Reset(). Bug: SetMaxBufferSize() didn't recompute _knob_smooth_coeff, so it stayed
+// calibrated for whatever (smaller) buffer size Reset() was last called with -- meaning a knob
+// jump would ramp far slower than the intended ~100ms once the buffer size grew, since each now-
+// larger buffer covers more wall-clock time but still closes only the smaller-buffer-sized
+// fraction of the gap.
+//
+// Strategy: mirrors test_parametric_knob_smoothing_converges above, but Model A reaches
+// `large_block` via the implicit fallback (Reset() at `small_block`, then a single process()
+// call at `large_block`) instead of via an explicit Reset() at that size. If the coefficient
+// were still stale, Model A's knob jump would converge far slower than n_converge buffers
+// (computed from the *correct*, large_block-calibrated coefficient) predicts, and diff_settled
+// would fail to shrink to the reference's converged state within that budget.
+void test_parametric_knob_smoothing_recalibrates_after_implicit_resize()
+{
+  const int channels = 3;
+  const int num_params = 1;
+  const double sample_rate = 48000.0;
+  const int small_block = 64;
+  const int large_block = 512;
+
+  const auto cfg = build_parametric_a2_config(channels, num_params);
+  const int weight_count = parametric_a2_weight_count(channels, num_params);
+  const auto weights = make_deterministic_weights(weight_count, /*seed=*/0x2E512E5u);
+
+  // Long enough to cover a full large_block-sized call; small_block calls just read its prefix.
+  const auto input = make_test_input(large_block, sample_rate);
+
+  auto run_buffers = [&](nam::DSP& dsp, int block, int n) {
+    std::vector<NAM_SAMPLE> out(block, static_cast<NAM_SAMPLE>(0));
+    NAM_SAMPLE* in_ptr = const_cast<NAM_SAMPLE*>(input.data());
+    NAM_SAMPLE* out_ptr = out.data();
+    NAM_SAMPLE* in_arr[] = {in_ptr};
+    NAM_SAMPLE* out_arr[] = {out_ptr};
+    for (int i = 0; i < n; i++)
+      dsp.process(in_arr, out_arr, block);
+    return out;
+  };
+
+  // Model A: Reset() at small_block, settle at the default there, then jump the knob and
+  // immediately call process() at large_block -- this single call both triggers the implicit
+  // resize (num_frames=large_block > GetMaxBufferSize()=small_block) AND is the buffer sampled
+  // right after the jump.
+  auto cfg_a = nam::wavenet::a2_fast::create_parametric_a2_fast_config(cfg, sample_rate);
+  std::vector<float> w_a = weights;
+  auto dsp_a = cfg_a->create(std::move(w_a), sample_rate);
+  dsp_a->Reset(sample_rate, small_block);
+  run_buffers(*dsp_a, small_block, 2); // settle at default (0.5) at the small size
+  dsp_a->SetKnobValues({1.0f});
+  const auto out_immediate = run_buffers(*dsp_a, large_block, 1); // triggers the implicit resize
+
+  // Buffers needed for (1 - coeff)^n to be negligible AT large_block -- the size that matters
+  // once the implicit resize has happened. Uses the *correct* formula (as if recomputed for
+  // large_block), which is exactly what should now be in effect after the fix.
+  const float smoothTimeSamples = static_cast<float>(sample_rate) * 0.100f;
+  const float coeff = 1.0f - std::exp(-static_cast<float>(large_block) / smoothTimeSamples);
+  const int n_converge = static_cast<int>(std::ceil(std::log(1e-6) / std::log(1.0 - coeff))) + 20;
+  const auto out_settled = run_buffers(*dsp_a, large_block, n_converge);
+
+  // Model B: reference -- Reset() directly at large_block (never touches the fallback path),
+  // knobs jumped to 1.0 before its first process() call. Its smoothing is unambiguously
+  // calibrated for large_block from the start.
+  auto cfg_b = nam::wavenet::a2_fast::create_parametric_a2_fast_config(cfg, sample_rate);
+  std::vector<float> w_b = weights;
+  auto dsp_b = cfg_b->create(std::move(w_b), sample_rate);
+  dsp_b->Reset(sample_rate, large_block);
+  dsp_b->SetKnobValues({1.0f});
+  const auto out_reference = run_buffers(*dsp_b, large_block, 1 + n_converge);
+
+  auto max_abs_diff = [](const std::vector<NAM_SAMPLE>& a, const std::vector<NAM_SAMPLE>& b) {
+    double d = 0.0;
+    for (size_t i = 0; i < a.size(); i++)
+      d = std::max(d, std::fabs(static_cast<double>(a[i]) - static_cast<double>(b[i])));
+    return d;
+  };
+
+  const double diff_immediate = max_abs_diff(out_immediate, out_reference);
+  const double diff_settled = max_abs_diff(out_settled, out_reference);
+
+  if (!(diff_settled < 1e-5) || !(diff_immediate > 100.0 * std::max(diff_settled, 1e-9)))
+  {
+    std::cerr << "ParametricA2FastModel knob smoothing after implicit resize: diff_immediate=" << diff_immediate
+              << " diff_settled=" << diff_settled
+              << " (want settled << immediate, settled ~ 0 -- if settled is large, the "
+              << "coefficient is still stale from small_block after the implicit resize)" << std::endl;
+    assert(false);
+  }
+  assert(diff_immediate > 100.0 * std::max(diff_settled, 1e-9));
+  assert(diff_settled < 1e-5);
+}
+// [Fork] END: knob smoothing recalibrates after an implicit buffer-size grow
 
 } // namespace test_a2_fast
 

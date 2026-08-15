@@ -897,7 +897,7 @@ void test_knob_smoothing_converges()
 
   // Enough buffers for (1 - coeff)^n to be negligible, derived from the same formula
   // Reset() uses (parametric_wavenet.cpp ~line 85-86), plus a healthy margin.
-  const float smoothTimeSamples = static_cast<float>(sample_rate) * 0.020f;
+  const float smoothTimeSamples = static_cast<float>(sample_rate) * 0.100f;
   const float coeff = 1.0f - std::exp(-static_cast<float>(block) / smoothTimeSamples);
   const int n_converge = static_cast<int>(std::ceil(std::log(1e-6) / std::log(1.0 - coeff))) + 20;
   const auto out_settled = run_buffers(*pwn_a, n_converge); // MANY buffers later
