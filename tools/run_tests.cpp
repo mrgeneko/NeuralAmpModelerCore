@@ -410,6 +410,9 @@ int main()
   // actually ramps rather than snapping instantly, and that it converges rather than
   // stalling partway.
   test_a2_fast::test_parametric_knob_smoothing_converges();
+  // [Fork] Knob smoothing must recalibrate for a larger buffer size reached via process()'s
+  // implicit SetMaxBufferSize() fallback, not just via an explicit Reset().
+  test_a2_fast::test_parametric_knob_smoothing_recalibrates_after_implicit_resize();
 #endif
 
   // ParametricWaveNet: config parsing, construction, processing, SetKnobValues, registry, factory

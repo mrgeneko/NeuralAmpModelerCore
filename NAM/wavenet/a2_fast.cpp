@@ -1994,7 +1994,7 @@ private:
   // [Fork] Per-buffer one-pole smoother — eliminates zipper noise when UI sliders move.
   // Audio thread only; no atomic needed. Initialized to default knob value (0.5).
   std::array<float, kMaxParams> _knob_smoothed{};
-  float _knob_smooth_coeff{0.3f}; // updated in Reset(); default covers startup before first Reset
+  float _knob_smooth_coeff{0.3f}; // recomputed in SetMaxBufferSize(); default covers startup before first Reset
 
   // Rechannel (1 → Channels), no bias.
   std::array<float, Channels> _rechannel_w{};
@@ -2193,6 +2193,19 @@ void ParametricA2FastModel<Channels>::SetMaxBufferSize(int maxBufferSize)
 {
   DSP::SetMaxBufferSize(maxBufferSize);
 
+  // [Fork] Recompute here (not just in Reset()) so the coefficient never goes stale: process()
+  // has a defensive fallback that calls SetMaxBufferSize() directly if num_frames ever exceeds
+  // what Reset() last sized for, without an intervening Reset(). mExternalSampleRate is set by
+  // DSP::Reset() before it dispatches to this override, so a normal Reset()-driven call already
+  // sees the correct, freshly-set sample rate here -- this single computation covers both paths.
+  // Guarded because SetMaxBufferSize() can in principle run before any Reset() (mHaveExternalSampleRate
+  // false, mExternalSampleRate at its -1.0 default); the 0.3f member-initializer default handles that case.
+  if (mHaveExternalSampleRate)
+  {
+    const float smoothTimeSamples = static_cast<float>(mExternalSampleRate) * 0.020f;
+    _knob_smooth_coeff = 1.0f - std::exp(-static_cast<float>(maxBufferSize) / smoothTimeSamples);
+  }
+
   _layer_in.assign(static_cast<size_t>(Channels) * maxBufferSize, 0.0f);
   _head_sum.assign(static_cast<size_t>(Channels) * maxBufferSize, 0.0f);
   _z.assign(static_cast<size_t>(Channels) * maxBufferSize, 0.0f);
@@ -2233,10 +2246,9 @@ void ParametricA2FastModel<Channels>::Reset(double sampleRate, int maxBufferSize
   _dc_alpha = 1.0f - 2.0f * static_cast<float>(M_PI) * 20.0f / static_cast<float>(sampleRate);
   _dc_x_prev = 0.0f;
   _dc_y_prev = 0.0f;
-  // [Fork] Per-buffer smooth coeff: 1 - exp(-bufferSize / (sampleRate * smoothTime)).
-  // 20 ms gives ~3-4 buffer transitions at 256-sample blocks — imperceptible lag, no zipper.
-  const float smoothTimeSamples = static_cast<float>(sampleRate) * 0.020f;
-  _knob_smooth_coeff = 1.0f - std::exp(-static_cast<float>(maxBufferSize) / smoothTimeSamples);
+  // _knob_smooth_coeff (20ms one-pole time constant) is recomputed inside SetMaxBufferSize(),
+  // which DSP::Reset() below calls after storing sampleRate into mExternalSampleRate -- see the
+  // comment there for why it isn't computed here directly.
   DSP::Reset(sampleRate, maxBufferSize); // calls SetMaxBufferSize then prewarm()
 }
 
