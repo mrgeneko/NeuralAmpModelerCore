@@ -22,6 +22,24 @@ all continue to work unchanged.
   fast path (`ParametricA2FastModel<Channels>`) exists alongside the generic path for channel widths 3–8,
   mirroring the non-parametric `A2FastModel` fast path this repo already had. See `NAM/wavenet/parametric_wavenet.h`
   and `NAM/wavenet/a2_fast.h`.
+* **LoRA-style knob conditioning**, optional and additive alongside FiLM (not a
+  replacement for it). Where FiLM only ever rescales one fixed backbone computation
+  (`gamma(cond)*x + beta(cond)`), LoRA adds a genuine per-knob weight *delta* on
+  `layer1x1` — `W_effective = W_base + A(cond)@B(cond)`, computed as two small matmuls
+  (`A @ (B @ x)`, the full `channels × channels` delta is never materialized) rather than
+  a rescale of a fixed computation. See `NAM/lora.h` (mirrors `NAM/film.h`'s structure
+  and RT-safety caching pattern exactly). Activated by an optional
+  `config["parametric"]["lora"]` block (`{"rank": N}`) that bumps
+  `config["parametric"]["schema_version"]` from 1 to 2 — `kMaxParametricSchemaVersion`
+  (`NAM/wavenet/parametric_wavenet.h`) gates this: an older build rejects a
+  schema-version-2 file loudly rather than silently misreading it. **The fast path has no
+  LoRA support and never will** — `ParametricA2FastModel` is a fully separate,
+  hand-optimized reimplementation with zero shared code with the generic
+  `Layer`/`FiLM`/`LoRA` classes. `is_parametric_a2_shape()` (`NAM/wavenet/a2_fast.cpp`)
+  gates on `config["parametric"]["type"]`: `"film"` (or absent, for every export before
+  this field existed) still takes the fast path unaffected; `"film+lora"` falls through
+  to the generic path. A FiLM-only model's behavior and performance are identical to
+  before LoRA existed in this codebase at all.
 * **Slimmable / multi-tier models.** `ContainerModel` holds several submodels at different capacities
   (e.g. a small/fast tier and a large/accurate tier) and switches between them at runtime via
   `SetSlimmableSize()`. Adds `GetAllowedSizes()` (the discrete sizes/channel-counts a host can pick between)
