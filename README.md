@@ -32,14 +32,19 @@ all continue to work unchanged.
   `config["parametric"]["lora"]` block (`{"rank": N}`) that bumps
   `config["parametric"]["schema_version"]` from 1 to 2 — `kMaxParametricSchemaVersion`
   (`NAM/wavenet/parametric_wavenet.h`) gates this: an older build rejects a
-  schema-version-2 file loudly rather than silently misreading it. **The fast path has no
-  LoRA support and never will** — `ParametricA2FastModel` is a fully separate,
-  hand-optimized reimplementation with zero shared code with the generic
-  `Layer`/`FiLM`/`LoRA` classes. `is_parametric_a2_shape()` (`NAM/wavenet/a2_fast.cpp`)
-  gates on `config["parametric"]["type"]`: `"film"` (or absent, for every export before
-  this field existed) still takes the fast path unaffected; `"film+lora"` falls through
-  to the generic path. A FiLM-only model's behavior and performance are identical to
-  before LoRA existed in this codebase at all.
+  schema-version-2 file loudly rather than silently misreading it. **The fast path now
+  supports LoRA too** — `ParametricA2FastModel` reimplements the same additive
+  `A(cond)@(B(cond)@x)` correction (`_apply_lora_frame` for channel widths 3-7's
+  hand-unrolled kernels; a batched Eigen GEMM path for anything outside 3-8, currently
+  unreachable in practice). `is_parametric_a2_shape()` (`NAM/wavenet/a2_fast.cpp`) accepts
+  `config["parametric"]["type"]` of `"film"` (or absent, for every export before this
+  field existed) or `"film+lora"` (requires `schema_version` 2 and a positive
+  `lora.rank`; malformed configs still fall back to the generic path). A FiLM-only
+  model's behavior and performance are unaffected by any of this — LoRA is fully gated on
+  `lora_rank > 0`. Numerically verified bit-for-bit against the generic reference across
+  channel widths 3-8, including the rank==channels edge case; measured (via Instruments,
+  in-app, not a synthetic benchmark) at roughly 20% -> 12% DSP for the shipped 8-channel
+  film+lora model.
 * **Slimmable / multi-tier models.** `ContainerModel` holds several submodels at different capacities
   (e.g. a small/fast tier and a large/accurate tier) and switches between them at runtime via
   `SetSlimmableSize()`. Adds `GetAllowedSizes()` (the discrete sizes/channel-counts a host can pick between)
