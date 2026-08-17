@@ -2076,10 +2076,14 @@ private:
   // Rebuild _lora_A/_lora_B for all layers from _knob_atoms. No-op if _lora_rank == 0.
   // Audio thread only, same cadence as _recompute_film (once per buffer).
   void _recompute_lora();
-  // Add layer li's LoRA correction (A @ (B @ a)) for one frame into lin[0..Channels-1].
-  // `a` is that frame's Channels-length post-activation (post-FiLM, post-LeakyReLU) values
-  // -- the same input layer1x1 consumes. No-op if _lora_rank == 0.
-  void _apply_lora_frame(int li, const float* NAM_RESTRICT a, float* NAM_RESTRICT lin) const;
+  // [Fork] Fold layer li's LoRA correction directly into l1x1's weight matrix, once per
+  // buffer (replaces the old per-frame _apply_lora_frame): out[j*Channels+i] =
+  // L.l1x1_w[j*Channels+i] + sum_r A[i*rank+r]*B[r*Channels+j], i.e. W_eff = W_base + A@B --
+  // exact, not an approximation, since A/B are themselves constant for the whole buffer
+  // (see _recompute_lora). `out` must have room for Channels*Channels floats and is written
+  // in l1x1_w's own layout so callers can use it as a drop-in replacement for L.l1x1_w.data().
+  // Only call when _lora_rank > 0 (no internal no-op guard, unlike the old per-frame version).
+  void _build_effective_l1x1(const Layer& L, int li, float* NAM_RESTRICT out) const;
   void _ring_write(Layer& L, int num_frames);
   // Write _head_sum (the skip-connection accumulator) into _head_history ring.
   void _head_ring_write(int num_frames);
@@ -2310,31 +2314,26 @@ void ParametricA2FastModel<Channels>::_recompute_lora()
   }
 }
 
-// --- _apply_lora_frame: A @ (B @ a), added into lin -- see LoRA::Process in NAM/lora.h ---
+// --- _build_effective_l1x1: W_eff = W_base + A@B, folded once per buffer (see NAM/lora.h's
+// Process() / model.cpp's _layer1x1_lora wiring for the generic-path reference this matches;
+// exact algebraic identity, not an approximation, since A/B are already buffer-constant) ---
 template <int Channels>
-void ParametricA2FastModel<Channels>::_apply_lora_frame(int li, const float* NAM_RESTRICT a,
-                                                         float* NAM_RESTRICT lin) const
+void ParametricA2FastModel<Channels>::_build_effective_l1x1(const Layer& L, int li,
+                                                             float* NAM_RESTRICT out) const
 {
-  if (_lora_rank <= 0)
-    return;
-  const float* NAM_RESTRICT A = _lora_A[li].data(); // Channels x rank, row-major: A[c*rank+r]
-  const float* NAM_RESTRICT B = _lora_B[li].data(); // rank x Channels, row-major: B[r*Channels+c]
-  float bx[kMaxLoraRank];
-  for (int r = 0; r < _lora_rank; r++)
+  const float* NAM_RESTRICT A = _lora_A[li].data(); // Channels x rank, row-major: A[i*rank+r]
+  const float* NAM_RESTRICT B = _lora_B[li].data(); // rank x Channels, row-major: B[r*Channels+j]
+  for (int j = 0; j < Channels; j++)
   {
-    float s = 0.0f;
-    const float* NAM_RESTRICT Brow = B + static_cast<size_t>(r) * Channels;
-    for (int c = 0; c < Channels; c++)
-      s += Brow[c] * a[c];
-    bx[r] = s;
-  }
-  for (int c = 0; c < Channels; c++)
-  {
-    float s = 0.0f;
-    const float* NAM_RESTRICT Arow = A + static_cast<size_t>(c) * _lora_rank;
-    for (int r = 0; r < _lora_rank; r++)
-      s += Arow[r] * bx[r];
-    lin[c] += s;
+    for (int i = 0; i < Channels; i++)
+    {
+      float s = 0.0f;
+      const float* NAM_RESTRICT Arow = A + static_cast<size_t>(i) * _lora_rank;
+      for (int r = 0; r < _lora_rank; r++)
+        s += Arow[r] * B[static_cast<size_t>(r) * Channels + j];
+      const size_t idx = static_cast<size_t>(j) * Channels + i;
+      out[idx] = L.l1x1_w[idx] + s;
+    }
   }
 }
 
@@ -2534,9 +2533,16 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
     const float cw3=wk_last[3],cw4=wk_last[4],cw5=wk_last[5];
     const float cw6=wk_last[6],cw7=wk_last[7],cw8=wk_last[8];
     const float mw0=L.mixin_w[0],mw1=L.mixin_w[1],mw2=L.mixin_w[2];
-    const float lw00=L.l1x1_w[0],lw01=L.l1x1_w[1],lw02=L.l1x1_w[2];
-    const float lw10=L.l1x1_w[3],lw11=L.l1x1_w[4],lw12=L.l1x1_w[5];
-    const float lw20=L.l1x1_w[6],lw21=L.l1x1_w[7],lw22=L.l1x1_w[8];
+    const float* NAM_RESTRICT l1x1_src = L.l1x1_w.data();
+    float eff_l1x1_w[Channels * Channels];
+    if (_lora_rank > 0)
+    {
+      _build_effective_l1x1(L, li, eff_l1x1_w);
+      l1x1_src = eff_l1x1_w;
+    }
+    const float lw00=l1x1_src[0],lw01=l1x1_src[1],lw02=l1x1_src[2];
+    const float lw10=l1x1_src[3],lw11=l1x1_src[4],lw12=l1x1_src[5];
+    const float lw20=l1x1_src[6],lw21=l1x1_src[7],lw22=l1x1_src[8];
     const float lb0=L.l1x1_b[0],lb1=L.l1x1_b[1],lb2=L.l1x1_b[2];
     for (int f = 0; f < num_frames; f++)
     {
@@ -2571,13 +2577,6 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       lin[0] += lb0 + lw00*a0 + lw10*a1 + lw20*a2;
       lin[1] += lb1 + lw01*a0 + lw11*a1 + lw21*a2;
       lin[2] += lb2 + lw02*a0 + lw12*a1 + lw22*a2;
-      // [Fork] Optional layer1x1 LoRA: additive low-rank update on the SAME post-
-      // activation `a` layer1x1 just consumed, added into lin -- see _apply_lora_frame.
-      if (_lora_rank > 0)
-      {
-        const float a[3] = {a0, a1, a2};
-        _apply_lora_frame(li, a, lin);
-      }
     }
   }
   // [Fork] BEGIN: hand-unrolled Channels==4 kernel, mirrors the Channels==3 branch
@@ -2642,10 +2641,17 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
     const float cw8 = wk_last[8], cw9 = wk_last[9], cw10 = wk_last[10], cw11 = wk_last[11];
     const float cw12 = wk_last[12], cw13 = wk_last[13], cw14 = wk_last[14], cw15 = wk_last[15];
     const float mw0 = L.mixin_w[0], mw1 = L.mixin_w[1], mw2 = L.mixin_w[2], mw3 = L.mixin_w[3];
-    const float lw00 = L.l1x1_w[0], lw01 = L.l1x1_w[1], lw02 = L.l1x1_w[2], lw03 = L.l1x1_w[3];
-    const float lw10 = L.l1x1_w[4], lw11 = L.l1x1_w[5], lw12 = L.l1x1_w[6], lw13 = L.l1x1_w[7];
-    const float lw20 = L.l1x1_w[8], lw21 = L.l1x1_w[9], lw22 = L.l1x1_w[10], lw23 = L.l1x1_w[11];
-    const float lw30 = L.l1x1_w[12], lw31 = L.l1x1_w[13], lw32 = L.l1x1_w[14], lw33 = L.l1x1_w[15];
+    const float* NAM_RESTRICT l1x1_src = L.l1x1_w.data();
+    float eff_l1x1_w[Channels * Channels];
+    if (_lora_rank > 0)
+    {
+      _build_effective_l1x1(L, li, eff_l1x1_w);
+      l1x1_src = eff_l1x1_w;
+    }
+    const float lw00 = l1x1_src[0], lw01 = l1x1_src[1], lw02 = l1x1_src[2], lw03 = l1x1_src[3];
+    const float lw10 = l1x1_src[4], lw11 = l1x1_src[5], lw12 = l1x1_src[6], lw13 = l1x1_src[7];
+    const float lw20 = l1x1_src[8], lw21 = l1x1_src[9], lw22 = l1x1_src[10], lw23 = l1x1_src[11];
+    const float lw30 = l1x1_src[12], lw31 = l1x1_src[13], lw32 = l1x1_src[14], lw33 = l1x1_src[15];
     const float lb0 = L.l1x1_b[0], lb1 = L.l1x1_b[1], lb2 = L.l1x1_b[2], lb3 = L.l1x1_b[3];
     for (int f = 0; f < num_frames; f++)
     {
@@ -2686,11 +2692,6 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       lin[1] += lb1 + lw01 * a0 + lw11 * a1 + lw21 * a2 + lw31 * a3;
       lin[2] += lb2 + lw02 * a0 + lw12 * a1 + lw22 * a2 + lw32 * a3;
       lin[3] += lb3 + lw03 * a0 + lw13 * a1 + lw23 * a2 + lw33 * a3;
-      if (_lora_rank > 0)
-      {
-        const float a[4] = {a0, a1, a2, a3};
-        _apply_lora_frame(li, a, lin);
-      }
     }
   }
   // [Fork] END: hand-unrolled Channels==4 kernel
@@ -2755,11 +2756,18 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
     const float cw15 = wk_last[15], cw16 = wk_last[16], cw17 = wk_last[17], cw18 = wk_last[18], cw19 = wk_last[19];
     const float cw20 = wk_last[20], cw21 = wk_last[21], cw22 = wk_last[22], cw23 = wk_last[23], cw24 = wk_last[24];
     const float mw0 = L.mixin_w[0], mw1 = L.mixin_w[1], mw2 = L.mixin_w[2], mw3 = L.mixin_w[3], mw4 = L.mixin_w[4];
-    const float lw00 = L.l1x1_w[0], lw01 = L.l1x1_w[1], lw02 = L.l1x1_w[2], lw03 = L.l1x1_w[3], lw04 = L.l1x1_w[4];
-    const float lw10 = L.l1x1_w[5], lw11 = L.l1x1_w[6], lw12 = L.l1x1_w[7], lw13 = L.l1x1_w[8], lw14 = L.l1x1_w[9];
-    const float lw20 = L.l1x1_w[10], lw21 = L.l1x1_w[11], lw22 = L.l1x1_w[12], lw23 = L.l1x1_w[13], lw24 = L.l1x1_w[14];
-    const float lw30 = L.l1x1_w[15], lw31 = L.l1x1_w[16], lw32 = L.l1x1_w[17], lw33 = L.l1x1_w[18], lw34 = L.l1x1_w[19];
-    const float lw40 = L.l1x1_w[20], lw41 = L.l1x1_w[21], lw42 = L.l1x1_w[22], lw43 = L.l1x1_w[23], lw44 = L.l1x1_w[24];
+    const float* NAM_RESTRICT l1x1_src = L.l1x1_w.data();
+    float eff_l1x1_w[Channels * Channels];
+    if (_lora_rank > 0)
+    {
+      _build_effective_l1x1(L, li, eff_l1x1_w);
+      l1x1_src = eff_l1x1_w;
+    }
+    const float lw00 = l1x1_src[0], lw01 = l1x1_src[1], lw02 = l1x1_src[2], lw03 = l1x1_src[3], lw04 = l1x1_src[4];
+    const float lw10 = l1x1_src[5], lw11 = l1x1_src[6], lw12 = l1x1_src[7], lw13 = l1x1_src[8], lw14 = l1x1_src[9];
+    const float lw20 = l1x1_src[10], lw21 = l1x1_src[11], lw22 = l1x1_src[12], lw23 = l1x1_src[13], lw24 = l1x1_src[14];
+    const float lw30 = l1x1_src[15], lw31 = l1x1_src[16], lw32 = l1x1_src[17], lw33 = l1x1_src[18], lw34 = l1x1_src[19];
+    const float lw40 = l1x1_src[20], lw41 = l1x1_src[21], lw42 = l1x1_src[22], lw43 = l1x1_src[23], lw44 = l1x1_src[24];
     const float lb0 = L.l1x1_b[0], lb1 = L.l1x1_b[1], lb2 = L.l1x1_b[2], lb3 = L.l1x1_b[3], lb4 = L.l1x1_b[4];
     for (int f = 0; f < num_frames; f++)
     {
@@ -2806,11 +2814,6 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       lin[2] += lb2 + lw02 * a0 + lw12 * a1 + lw22 * a2 + lw32 * a3 + lw42 * a4;
       lin[3] += lb3 + lw03 * a0 + lw13 * a1 + lw23 * a2 + lw33 * a3 + lw43 * a4;
       lin[4] += lb4 + lw04 * a0 + lw14 * a1 + lw24 * a2 + lw34 * a3 + lw44 * a4;
-      if (_lora_rank > 0)
-      {
-        const float a[5] = {a0, a1, a2, a3, a4};
-        _apply_lora_frame(li, a, lin);
-      }
     }
   }
   // [Fork] END: hand-unrolled Channels==5 kernel
@@ -2880,12 +2883,19 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
     const float cw24 = wk_last[24], cw25 = wk_last[25], cw26 = wk_last[26], cw27 = wk_last[27], cw28 = wk_last[28], cw29 = wk_last[29];
     const float cw30 = wk_last[30], cw31 = wk_last[31], cw32 = wk_last[32], cw33 = wk_last[33], cw34 = wk_last[34], cw35 = wk_last[35];
     const float mw0 = L.mixin_w[0], mw1 = L.mixin_w[1], mw2 = L.mixin_w[2], mw3 = L.mixin_w[3], mw4 = L.mixin_w[4], mw5 = L.mixin_w[5];
-    const float lw00 = L.l1x1_w[0], lw01 = L.l1x1_w[1], lw02 = L.l1x1_w[2], lw03 = L.l1x1_w[3], lw04 = L.l1x1_w[4], lw05 = L.l1x1_w[5];
-    const float lw10 = L.l1x1_w[6], lw11 = L.l1x1_w[7], lw12 = L.l1x1_w[8], lw13 = L.l1x1_w[9], lw14 = L.l1x1_w[10], lw15 = L.l1x1_w[11];
-    const float lw20 = L.l1x1_w[12], lw21 = L.l1x1_w[13], lw22 = L.l1x1_w[14], lw23 = L.l1x1_w[15], lw24 = L.l1x1_w[16], lw25 = L.l1x1_w[17];
-    const float lw30 = L.l1x1_w[18], lw31 = L.l1x1_w[19], lw32 = L.l1x1_w[20], lw33 = L.l1x1_w[21], lw34 = L.l1x1_w[22], lw35 = L.l1x1_w[23];
-    const float lw40 = L.l1x1_w[24], lw41 = L.l1x1_w[25], lw42 = L.l1x1_w[26], lw43 = L.l1x1_w[27], lw44 = L.l1x1_w[28], lw45 = L.l1x1_w[29];
-    const float lw50 = L.l1x1_w[30], lw51 = L.l1x1_w[31], lw52 = L.l1x1_w[32], lw53 = L.l1x1_w[33], lw54 = L.l1x1_w[34], lw55 = L.l1x1_w[35];
+    const float* NAM_RESTRICT l1x1_src = L.l1x1_w.data();
+    float eff_l1x1_w[Channels * Channels];
+    if (_lora_rank > 0)
+    {
+      _build_effective_l1x1(L, li, eff_l1x1_w);
+      l1x1_src = eff_l1x1_w;
+    }
+    const float lw00 = l1x1_src[0], lw01 = l1x1_src[1], lw02 = l1x1_src[2], lw03 = l1x1_src[3], lw04 = l1x1_src[4], lw05 = l1x1_src[5];
+    const float lw10 = l1x1_src[6], lw11 = l1x1_src[7], lw12 = l1x1_src[8], lw13 = l1x1_src[9], lw14 = l1x1_src[10], lw15 = l1x1_src[11];
+    const float lw20 = l1x1_src[12], lw21 = l1x1_src[13], lw22 = l1x1_src[14], lw23 = l1x1_src[15], lw24 = l1x1_src[16], lw25 = l1x1_src[17];
+    const float lw30 = l1x1_src[18], lw31 = l1x1_src[19], lw32 = l1x1_src[20], lw33 = l1x1_src[21], lw34 = l1x1_src[22], lw35 = l1x1_src[23];
+    const float lw40 = l1x1_src[24], lw41 = l1x1_src[25], lw42 = l1x1_src[26], lw43 = l1x1_src[27], lw44 = l1x1_src[28], lw45 = l1x1_src[29];
+    const float lw50 = l1x1_src[30], lw51 = l1x1_src[31], lw52 = l1x1_src[32], lw53 = l1x1_src[33], lw54 = l1x1_src[34], lw55 = l1x1_src[35];
     const float lb0 = L.l1x1_b[0], lb1 = L.l1x1_b[1], lb2 = L.l1x1_b[2], lb3 = L.l1x1_b[3], lb4 = L.l1x1_b[4], lb5 = L.l1x1_b[5];
     for (int f = 0; f < num_frames; f++)
     {
@@ -2938,11 +2948,6 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       lin[3] += lb3 + lw03 * a0 + lw13 * a1 + lw23 * a2 + lw33 * a3 + lw43 * a4 + lw53 * a5;
       lin[4] += lb4 + lw04 * a0 + lw14 * a1 + lw24 * a2 + lw34 * a3 + lw44 * a4 + lw54 * a5;
       lin[5] += lb5 + lw05 * a0 + lw15 * a1 + lw25 * a2 + lw35 * a3 + lw45 * a4 + lw55 * a5;
-      if (_lora_rank > 0)
-      {
-        const float a[6] = {a0, a1, a2, a3, a4, a5};
-        _apply_lora_frame(li, a, lin);
-      }
     }
   }
   // [Fork] END: hand-unrolled Channels==6 kernel
@@ -3017,13 +3022,20 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
     const float cw35 = wk_last[35], cw36 = wk_last[36], cw37 = wk_last[37], cw38 = wk_last[38], cw39 = wk_last[39], cw40 = wk_last[40], cw41 = wk_last[41];
     const float cw42 = wk_last[42], cw43 = wk_last[43], cw44 = wk_last[44], cw45 = wk_last[45], cw46 = wk_last[46], cw47 = wk_last[47], cw48 = wk_last[48];
     const float mw0 = L.mixin_w[0], mw1 = L.mixin_w[1], mw2 = L.mixin_w[2], mw3 = L.mixin_w[3], mw4 = L.mixin_w[4], mw5 = L.mixin_w[5], mw6 = L.mixin_w[6];
-    const float lw00 = L.l1x1_w[0], lw01 = L.l1x1_w[1], lw02 = L.l1x1_w[2], lw03 = L.l1x1_w[3], lw04 = L.l1x1_w[4], lw05 = L.l1x1_w[5], lw06 = L.l1x1_w[6];
-    const float lw10 = L.l1x1_w[7], lw11 = L.l1x1_w[8], lw12 = L.l1x1_w[9], lw13 = L.l1x1_w[10], lw14 = L.l1x1_w[11], lw15 = L.l1x1_w[12], lw16 = L.l1x1_w[13];
-    const float lw20 = L.l1x1_w[14], lw21 = L.l1x1_w[15], lw22 = L.l1x1_w[16], lw23 = L.l1x1_w[17], lw24 = L.l1x1_w[18], lw25 = L.l1x1_w[19], lw26 = L.l1x1_w[20];
-    const float lw30 = L.l1x1_w[21], lw31 = L.l1x1_w[22], lw32 = L.l1x1_w[23], lw33 = L.l1x1_w[24], lw34 = L.l1x1_w[25], lw35 = L.l1x1_w[26], lw36 = L.l1x1_w[27];
-    const float lw40 = L.l1x1_w[28], lw41 = L.l1x1_w[29], lw42 = L.l1x1_w[30], lw43 = L.l1x1_w[31], lw44 = L.l1x1_w[32], lw45 = L.l1x1_w[33], lw46 = L.l1x1_w[34];
-    const float lw50 = L.l1x1_w[35], lw51 = L.l1x1_w[36], lw52 = L.l1x1_w[37], lw53 = L.l1x1_w[38], lw54 = L.l1x1_w[39], lw55 = L.l1x1_w[40], lw56 = L.l1x1_w[41];
-    const float lw60 = L.l1x1_w[42], lw61 = L.l1x1_w[43], lw62 = L.l1x1_w[44], lw63 = L.l1x1_w[45], lw64 = L.l1x1_w[46], lw65 = L.l1x1_w[47], lw66 = L.l1x1_w[48];
+    const float* NAM_RESTRICT l1x1_src = L.l1x1_w.data();
+    float eff_l1x1_w[Channels * Channels];
+    if (_lora_rank > 0)
+    {
+      _build_effective_l1x1(L, li, eff_l1x1_w);
+      l1x1_src = eff_l1x1_w;
+    }
+    const float lw00 = l1x1_src[0], lw01 = l1x1_src[1], lw02 = l1x1_src[2], lw03 = l1x1_src[3], lw04 = l1x1_src[4], lw05 = l1x1_src[5], lw06 = l1x1_src[6];
+    const float lw10 = l1x1_src[7], lw11 = l1x1_src[8], lw12 = l1x1_src[9], lw13 = l1x1_src[10], lw14 = l1x1_src[11], lw15 = l1x1_src[12], lw16 = l1x1_src[13];
+    const float lw20 = l1x1_src[14], lw21 = l1x1_src[15], lw22 = l1x1_src[16], lw23 = l1x1_src[17], lw24 = l1x1_src[18], lw25 = l1x1_src[19], lw26 = l1x1_src[20];
+    const float lw30 = l1x1_src[21], lw31 = l1x1_src[22], lw32 = l1x1_src[23], lw33 = l1x1_src[24], lw34 = l1x1_src[25], lw35 = l1x1_src[26], lw36 = l1x1_src[27];
+    const float lw40 = l1x1_src[28], lw41 = l1x1_src[29], lw42 = l1x1_src[30], lw43 = l1x1_src[31], lw44 = l1x1_src[32], lw45 = l1x1_src[33], lw46 = l1x1_src[34];
+    const float lw50 = l1x1_src[35], lw51 = l1x1_src[36], lw52 = l1x1_src[37], lw53 = l1x1_src[38], lw54 = l1x1_src[39], lw55 = l1x1_src[40], lw56 = l1x1_src[41];
+    const float lw60 = l1x1_src[42], lw61 = l1x1_src[43], lw62 = l1x1_src[44], lw63 = l1x1_src[45], lw64 = l1x1_src[46], lw65 = l1x1_src[47], lw66 = l1x1_src[48];
     const float lb0 = L.l1x1_b[0], lb1 = L.l1x1_b[1], lb2 = L.l1x1_b[2], lb3 = L.l1x1_b[3], lb4 = L.l1x1_b[4], lb5 = L.l1x1_b[5], lb6 = L.l1x1_b[6];
     for (int f = 0; f < num_frames; f++)
     {
@@ -3082,11 +3094,6 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       lin[4] += lb4 + lw04 * a0 + lw14 * a1 + lw24 * a2 + lw34 * a3 + lw44 * a4 + lw54 * a5 + lw64 * a6;
       lin[5] += lb5 + lw05 * a0 + lw15 * a1 + lw25 * a2 + lw35 * a3 + lw45 * a4 + lw55 * a5 + lw65 * a6;
       lin[6] += lb6 + lw06 * a0 + lw16 * a1 + lw26 * a2 + lw36 * a3 + lw46 * a4 + lw56 * a5 + lw66 * a6;
-      if (_lora_rank > 0)
-      {
-        const float a[7] = {a0, a1, a2, a3, a4, a5, a6};
-        _apply_lora_frame(li, a, lin);
-      }
     }
   }
   // [Fork] END: hand-unrolled Channels==7 kernel
@@ -3173,14 +3180,21 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
     const float cw48 = wk_last[48], cw49 = wk_last[49], cw50 = wk_last[50], cw51 = wk_last[51], cw52 = wk_last[52], cw53 = wk_last[53], cw54 = wk_last[54], cw55 = wk_last[55];
     const float cw56 = wk_last[56], cw57 = wk_last[57], cw58 = wk_last[58], cw59 = wk_last[59], cw60 = wk_last[60], cw61 = wk_last[61], cw62 = wk_last[62], cw63 = wk_last[63];
     const float mw0 = L.mixin_w[0], mw1 = L.mixin_w[1], mw2 = L.mixin_w[2], mw3 = L.mixin_w[3], mw4 = L.mixin_w[4], mw5 = L.mixin_w[5], mw6 = L.mixin_w[6], mw7 = L.mixin_w[7];
-    const float lw00 = L.l1x1_w[0], lw01 = L.l1x1_w[1], lw02 = L.l1x1_w[2], lw03 = L.l1x1_w[3], lw04 = L.l1x1_w[4], lw05 = L.l1x1_w[5], lw06 = L.l1x1_w[6], lw07 = L.l1x1_w[7];
-    const float lw10 = L.l1x1_w[8], lw11 = L.l1x1_w[9], lw12 = L.l1x1_w[10], lw13 = L.l1x1_w[11], lw14 = L.l1x1_w[12], lw15 = L.l1x1_w[13], lw16 = L.l1x1_w[14], lw17 = L.l1x1_w[15];
-    const float lw20 = L.l1x1_w[16], lw21 = L.l1x1_w[17], lw22 = L.l1x1_w[18], lw23 = L.l1x1_w[19], lw24 = L.l1x1_w[20], lw25 = L.l1x1_w[21], lw26 = L.l1x1_w[22], lw27 = L.l1x1_w[23];
-    const float lw30 = L.l1x1_w[24], lw31 = L.l1x1_w[25], lw32 = L.l1x1_w[26], lw33 = L.l1x1_w[27], lw34 = L.l1x1_w[28], lw35 = L.l1x1_w[29], lw36 = L.l1x1_w[30], lw37 = L.l1x1_w[31];
-    const float lw40 = L.l1x1_w[32], lw41 = L.l1x1_w[33], lw42 = L.l1x1_w[34], lw43 = L.l1x1_w[35], lw44 = L.l1x1_w[36], lw45 = L.l1x1_w[37], lw46 = L.l1x1_w[38], lw47 = L.l1x1_w[39];
-    const float lw50 = L.l1x1_w[40], lw51 = L.l1x1_w[41], lw52 = L.l1x1_w[42], lw53 = L.l1x1_w[43], lw54 = L.l1x1_w[44], lw55 = L.l1x1_w[45], lw56 = L.l1x1_w[46], lw57 = L.l1x1_w[47];
-    const float lw60 = L.l1x1_w[48], lw61 = L.l1x1_w[49], lw62 = L.l1x1_w[50], lw63 = L.l1x1_w[51], lw64 = L.l1x1_w[52], lw65 = L.l1x1_w[53], lw66 = L.l1x1_w[54], lw67 = L.l1x1_w[55];
-    const float lw70 = L.l1x1_w[56], lw71 = L.l1x1_w[57], lw72 = L.l1x1_w[58], lw73 = L.l1x1_w[59], lw74 = L.l1x1_w[60], lw75 = L.l1x1_w[61], lw76 = L.l1x1_w[62], lw77 = L.l1x1_w[63];
+    const float* NAM_RESTRICT l1x1_src = L.l1x1_w.data();
+    float eff_l1x1_w[Channels * Channels];
+    if (_lora_rank > 0)
+    {
+      _build_effective_l1x1(L, li, eff_l1x1_w);
+      l1x1_src = eff_l1x1_w;
+    }
+    const float lw00 = l1x1_src[0], lw01 = l1x1_src[1], lw02 = l1x1_src[2], lw03 = l1x1_src[3], lw04 = l1x1_src[4], lw05 = l1x1_src[5], lw06 = l1x1_src[6], lw07 = l1x1_src[7];
+    const float lw10 = l1x1_src[8], lw11 = l1x1_src[9], lw12 = l1x1_src[10], lw13 = l1x1_src[11], lw14 = l1x1_src[12], lw15 = l1x1_src[13], lw16 = l1x1_src[14], lw17 = l1x1_src[15];
+    const float lw20 = l1x1_src[16], lw21 = l1x1_src[17], lw22 = l1x1_src[18], lw23 = l1x1_src[19], lw24 = l1x1_src[20], lw25 = l1x1_src[21], lw26 = l1x1_src[22], lw27 = l1x1_src[23];
+    const float lw30 = l1x1_src[24], lw31 = l1x1_src[25], lw32 = l1x1_src[26], lw33 = l1x1_src[27], lw34 = l1x1_src[28], lw35 = l1x1_src[29], lw36 = l1x1_src[30], lw37 = l1x1_src[31];
+    const float lw40 = l1x1_src[32], lw41 = l1x1_src[33], lw42 = l1x1_src[34], lw43 = l1x1_src[35], lw44 = l1x1_src[36], lw45 = l1x1_src[37], lw46 = l1x1_src[38], lw47 = l1x1_src[39];
+    const float lw50 = l1x1_src[40], lw51 = l1x1_src[41], lw52 = l1x1_src[42], lw53 = l1x1_src[43], lw54 = l1x1_src[44], lw55 = l1x1_src[45], lw56 = l1x1_src[46], lw57 = l1x1_src[47];
+    const float lw60 = l1x1_src[48], lw61 = l1x1_src[49], lw62 = l1x1_src[50], lw63 = l1x1_src[51], lw64 = l1x1_src[52], lw65 = l1x1_src[53], lw66 = l1x1_src[54], lw67 = l1x1_src[55];
+    const float lw70 = l1x1_src[56], lw71 = l1x1_src[57], lw72 = l1x1_src[58], lw73 = l1x1_src[59], lw74 = l1x1_src[60], lw75 = l1x1_src[61], lw76 = l1x1_src[62], lw77 = l1x1_src[63];
     const float lb0 = L.l1x1_b[0], lb1 = L.l1x1_b[1], lb2 = L.l1x1_b[2], lb3 = L.l1x1_b[3], lb4 = L.l1x1_b[4], lb5 = L.l1x1_b[5], lb6 = L.l1x1_b[6], lb7 = L.l1x1_b[7];
     for (int f = 0; f < num_frames; f++)
     {
@@ -3245,11 +3259,6 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       lin[5] += lb5 + lw05 * a0 + lw15 * a1 + lw25 * a2 + lw35 * a3 + lw45 * a4 + lw55 * a5 + lw65 * a6 + lw75 * a7;
       lin[6] += lb6 + lw06 * a0 + lw16 * a1 + lw26 * a2 + lw36 * a3 + lw46 * a4 + lw56 * a5 + lw66 * a6 + lw76 * a7;
       lin[7] += lb7 + lw07 * a0 + lw17 * a1 + lw27 * a2 + lw37 * a3 + lw47 * a4 + lw57 * a5 + lw67 * a6 + lw77 * a7;
-      if (_lora_rank > 0)
-      {
-        const float a[8] = {a0, a1, a2, a3, a4, a5, a6, a7};
-        _apply_lora_frame(li, a, lin);
-      }
     }
   }
   // [Fork] END: hand-unrolled Channels==8 kernel
