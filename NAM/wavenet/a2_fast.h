@@ -68,12 +68,17 @@ std::unique_ptr<ModelConfig> create_a2_fast_config(const nlohmann::json& config,
 ///
 /// Unlike is_a2_shape, this accepts the compact ParametricWaveNet JSON format where
 /// config["layers"] is an integer (channel count), not an array. Checks that channels
-/// are in {3, 4, 5, 6, 7, 8} and that a valid "parametric" block is present.
+/// are in {3, 4, 5, 6, 7, 8} and that a valid "parametric" block is present. Also accepts
+/// "film+lora" (schema_version 2, config["parametric"]["lora"]["rank"] present and positive)
+/// -- see LoRA in NAM/lora.h for what the extra conditioning does.
 /// \param config      The "config" sub-object from a ParametricWaveNet model entry.
 /// \param channels    Out-param set to 3-8 on match.
 /// \param num_params  Out-param set to condition_size on match.
+/// \param lora_rank   Out-param set to the LoRA rank on match if the model has a LoRA
+///                    block, or 0 if it's FiLM-only. May be nullptr if not needed.
 /// \return true if the config can be dispatched to the parametric A2 fast path.
-bool is_parametric_a2_shape(const nlohmann::json& config, int* channels, int* num_params);
+bool is_parametric_a2_shape(const nlohmann::json& config, int* channels, int* num_params,
+                            int* lora_rank = nullptr);
 
 /// \brief Build a ModelConfig that instantiates the parametric A2 fast path.
 /// \pre is_parametric_a2_shape(config, ...) returned true.

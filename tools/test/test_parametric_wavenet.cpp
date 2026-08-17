@@ -239,21 +239,46 @@ void test_skip_model_loads_and_takes_fast_path()
 }
 
 // [Fork] Phase 4 of the LoRA plan: end-to-end proof that a LoRA-tagged model is dispatched
-// to the generic (correct) path, not just that is_parametric_a2_shape() itself returns
-// false in isolation -- a gate-only unit test would miss a wiring bug where the gate's
-// result is computed but never actually consulted at the create_parametric_config() call
-// site. dynamic_cast<ParametricWaveNetConfig*> != nullptr means the GENERIC path was taken
-// (mirrors the existing convention in test_skip_model_loads_and_takes_fast_path above).
-void test_lora_tagged_model_takes_generic_path()
+// to the FAST path (once the a2_fast LoRA port landed -- ParametricA2FastModel's _lora_*
+// members / _recompute_lora / _apply_lora_frame in a2_fast.cpp), not just that
+// is_parametric_a2_shape() itself returns true in isolation -- a gate-only unit test would
+// miss a wiring bug where the gate's result is computed but never actually consulted at the
+// create_parametric_config() call site. dynamic_cast<ParametricWaveNetConfig*> == nullptr
+// means the FAST path was taken (mirrors test_skip_model_loads_and_takes_fast_path above).
+void test_complete_lora_tagged_model_takes_fast_path()
 {
   nlohmann::json cfg;
-  cfg["layers"] = 3; // otherwise a supported fast-path width
+  cfg["layers"] = 3; // a supported fast-path width
   cfg["head_scale"] = 1.0f;
   cfg["parametric"]["condition_size"] = 1;
   cfg["parametric"]["head_mode"] = "skip";
   cfg["parametric"]["schema_version"] = 2;
   cfg["parametric"]["type"] = "film+lora";
   cfg["parametric"]["lora"]["rank"] = 2;
+
+  auto config = nam::wavenet::create_parametric_config(cfg, 48000.0);
+  assert(config != nullptr);
+#if defined(NAM_ENABLE_A2_FAST)
+  assert(dynamic_cast<nam::wavenet::ParametricWaveNetConfig*>(config.get()) == nullptr);
+#else
+  assert(dynamic_cast<nam::wavenet::ParametricWaveNetConfig*>(config.get()) != nullptr);
+#endif
+}
+
+// A LoRA-tagged model this build doesn't fully understand (missing schema_version here)
+// must fall through to the generic path even with NAM_ENABLE_A2_FAST compiled in -- the
+// gate fails closed rather than guessing at an unfamiliar shape. See
+// is_parametric_a2_shape()'s schema_version check in a2_fast.cpp.
+void test_incomplete_lora_tagged_model_takes_generic_path()
+{
+  nlohmann::json cfg;
+  cfg["layers"] = 3;
+  cfg["head_scale"] = 1.0f;
+  cfg["parametric"]["condition_size"] = 1;
+  cfg["parametric"]["head_mode"] = "skip";
+  cfg["parametric"]["type"] = "film+lora";
+  cfg["parametric"]["lora"]["rank"] = 2;
+  // No schema_version set.
 
   auto config = nam::wavenet::create_parametric_config(cfg, 48000.0);
   assert(config != nullptr);

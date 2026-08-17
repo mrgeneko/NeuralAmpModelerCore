@@ -1927,7 +1927,8 @@ public:
   static constexpr int kMaxParams = ParametricWaveNet::kMaxParams;
 
   ParametricA2FastModel(std::vector<float> weights, double expected_sample_rate,
-                        int num_params, std::vector<ParametricParam> param_defs);
+                        int num_params, std::vector<ParametricParam> param_defs,
+                        int lora_rank = 0);
   ~ParametricA2FastModel() override = default;
 
   // Thread-safe: may be called from UI thread while process() runs on audio thread.
@@ -1988,6 +1989,42 @@ private:
   std::array<std::array<float, Channels>, kNumLayers> _film_gamma{};
   std::array<std::array<float, Channels>, kNumLayers> _film_beta{};
 
+  // [Fork] Optional layer1x1 LoRA (schema_version 2, config["parametric"]["type"] ==
+  // "film+lora"). Additive low-rank update on layer1x1's output -- see NAM/lora.h and
+  // model.cpp's _layer1x1_lora wiring for the generic-path reference this must match.
+  // _lora_rank == 0 means the model has no LoRA block (every _lora_* member below is then
+  // simply unused/empty); this is the overwhelmingly common case, so every LoRA-touching
+  // code path is gated on `if (_lora_rank > 0)` to keep FiLM-only models at their existing
+  // cost.
+  static constexpr int kMaxLoraRank = 16; // generous ceiling; real models use rank 2-8
+  int _lora_rank = 0;
+
+  // Per-layer LoRA net_A/net_B weights (Conv1x1: num_params -> Channels*rank / rank*Channels).
+  // net_A_w[li]: (Channels*rank rows x num_params cols), row-major. net_B_w[li]: (rank*Channels
+  // rows x num_params cols), row-major. Same layout convention as _film_layers above.
+  struct LoraLayer
+  {
+    std::vector<float> net_A_w; // Channels*rank x num_params, row-major
+    std::vector<float> net_A_b; // Channels*rank
+    std::vector<float> net_B_w; // rank*Channels x num_params, row-major
+    std::vector<float> net_B_b; // rank*Channels
+  };
+  std::array<LoraLayer, kNumLayers> _lora_layers;
+
+  // Per-layer precomputed A (Channels x rank, row-major: A[c*rank+r]) and B (rank x
+  // Channels, row-major: B[r*Channels+c]) -- exactly net_A/net_B's raw Conv1x1 output
+  // vectors, un-reshaped: lora.h documents the reshape as row-major .view(), which for a
+  // flat vector is a no-op reinterpretation, not a data movement. Rebuilt once per buffer
+  // from _knob_atoms (mirrors _film_gamma/_film_beta). Sized for kMaxLoraRank even when
+  // _lora_rank is smaller; the unused tail is simply never written or read.
+  std::array<std::array<float, Channels * kMaxLoraRank>, kNumLayers> _lora_A{};
+  std::array<std::array<float, kMaxLoraRank * Channels>, kNumLayers> _lora_B{};
+
+  // [Fork] Scratch space for the batched (Channels==8 / Eigen-fallback) LoRA GEMM's
+  // intermediate B@ztile result (rank x maxBufferSize). Preallocated in SetMaxBufferSize
+  // and reused every call -- audio thread must never heap-allocate per-buffer/per-layer.
+  std::vector<float, Eigen::aligned_allocator<float>> _lora_bx_scratch;
+
   int _num_params = 0;
   std::vector<ParametricParam> _param_defs;
   std::array<std::atomic<float>, kMaxParams> _knob_atoms{};
@@ -2036,6 +2073,13 @@ private:
   void _load_weights(std::vector<float>& weights);
   // Rebuild _film_gamma/_film_beta for all layers from _knob_atoms. Audio thread only.
   void _recompute_film();
+  // Rebuild _lora_A/_lora_B for all layers from _knob_atoms. No-op if _lora_rank == 0.
+  // Audio thread only, same cadence as _recompute_film (once per buffer).
+  void _recompute_lora();
+  // Add layer li's LoRA correction (A @ (B @ a)) for one frame into lin[0..Channels-1].
+  // `a` is that frame's Channels-length post-activation (post-FiLM, post-LeakyReLU) values
+  // -- the same input layer1x1 consumes. No-op if _lora_rank == 0.
+  void _apply_lora_frame(int li, const float* NAM_RESTRICT a, float* NAM_RESTRICT lin) const;
   void _ring_write(Layer& L, int num_frames);
   // Write _head_sum (the skip-connection accumulator) into _head_history ring.
   void _head_ring_write(int num_frames);
@@ -2051,11 +2095,18 @@ template <int Channels>
 ParametricA2FastModel<Channels>::ParametricA2FastModel(std::vector<float> weights,
                                                         double expected_sample_rate,
                                                         int num_params,
-                                                        std::vector<ParametricParam> param_defs)
+                                                        std::vector<ParametricParam> param_defs,
+                                                        int lora_rank)
 : DSP(/*in_channels=*/1, /*out_channels=*/1, expected_sample_rate)
+, _lora_rank(lora_rank)
 , _num_params(num_params)
 , _param_defs(std::move(param_defs))
 {
+  if (_lora_rank > kMaxLoraRank)
+    throw std::runtime_error("ParametricA2FastModel: lora rank " + std::to_string(_lora_rank)
+                             + " exceeds the fast path's compiled-in ceiling of "
+                             + std::to_string(kMaxLoraRank));
+
   for (int i = 0; i < kNumLayers; i++)
   {
     _layers[i].kernel_size = kKernelSizes[i];
@@ -2064,6 +2115,13 @@ ParametricA2FastModel<Channels>::ParametricA2FastModel(std::vector<float> weight
     _layers[i].conv_w.assign(static_cast<size_t>(kKernelSizes[i]) * Channels * Channels, 0.0f);
     _film_layers[i].net_w.assign(static_cast<size_t>(2 * Channels) * num_params, 0.0f);
     _film_layers[i].net_b.assign(static_cast<size_t>(2 * Channels), 0.0f);
+    if (_lora_rank > 0)
+    {
+      _lora_layers[i].net_A_w.assign(static_cast<size_t>(Channels * _lora_rank) * num_params, 0.0f);
+      _lora_layers[i].net_A_b.assign(static_cast<size_t>(Channels * _lora_rank), 0.0f);
+      _lora_layers[i].net_B_w.assign(static_cast<size_t>(_lora_rank * Channels) * num_params, 0.0f);
+      _lora_layers[i].net_B_b.assign(static_cast<size_t>(_lora_rank * Channels), 0.0f);
+    }
   }
 
   // Default knob values match ParametricWaveNet constructor.
@@ -2132,6 +2190,26 @@ void ParametricA2FastModel<Channels>::_load_weights(std::vector<float>& weights)
         _film_layers[li].net_w[i * _num_params + j] = take();
     for (int i = 0; i < 2 * Channels; i++)
       _film_layers[li].net_b[i] = take();
+
+    // Optional LoRA net_A/net_B (schema_version 2 only): Conv1x1(num_params → Channels*rank)
+    // then Conv1x1(num_params → rank*Channels), each weight-then-bias, matching the order
+    // documented in parametric_wavenet.h's WEIGHT LAYOUT comment and Layer::set_weights_.
+    if (_lora_rank > 0)
+    {
+      const int a_out = Channels * _lora_rank;
+      for (int i = 0; i < a_out; i++)
+        for (int j = 0; j < _num_params; j++)
+          _lora_layers[li].net_A_w[i * _num_params + j] = take();
+      for (int i = 0; i < a_out; i++)
+        _lora_layers[li].net_A_b[i] = take();
+
+      const int b_out = _lora_rank * Channels;
+      for (int i = 0; i < b_out; i++)
+        for (int j = 0; j < _num_params; j++)
+          _lora_layers[li].net_B_w[i * _num_params + j] = take();
+      for (int i = 0; i < b_out; i++)
+        _lora_layers[li].net_B_b[i] = take();
+    }
   }
 
   // Head rechannel: Channels → 1, kernel=16, bias. Col-major per tap.
@@ -2187,6 +2265,79 @@ void ParametricA2FastModel<Channels>::_recompute_film()
   }
 }
 
+// --- _recompute_lora: rebuild A/B from knob atomics (audio thread, once per buffer) ---
+template <int Channels>
+void ParametricA2FastModel<Channels>::_recompute_lora()
+{
+  if (_lora_rank <= 0)
+    return;
+
+  // Reuses the SAME smoothed knob values _recompute_film() just computed this buffer --
+  // process() calls _recompute_film() immediately before this, so _knob_smoothed is
+  // already current. Recomputing from _knob_atoms here (rather than threading the array
+  // through) keeps this function self-contained and matches _recompute_film()'s own style;
+  // the one-pole state itself only advances once regardless (each call reads the same
+  // already-updated _knob_smoothed, it does not re-step the filter).
+  float knobs[kMaxParams];
+  for (int j = 0; j < _num_params; j++)
+    knobs[j] = _knob_smoothed[j];
+
+  for (int li = 0; li < kNumLayers; li++)
+  {
+    const LoraLayer& L = _lora_layers[li];
+    // A = net_A(knobs), raw Conv1x1 output, length Channels*rank -- already in the flat
+    // row-major (Channels, rank) layout lora.h's Process() expects (see the class member
+    // doc comment above for why no reshape/copy is needed).
+    const int a_out = Channels * _lora_rank;
+    for (int i = 0; i < a_out; i++)
+    {
+      float v = L.net_A_b[i];
+      const float* w = &L.net_A_w[static_cast<size_t>(i) * _num_params];
+      for (int j = 0; j < _num_params; j++)
+        v += w[j] * knobs[j];
+      _lora_A[li][i] = v;
+    }
+    // B = net_B(knobs), length rank*Channels, flat row-major (rank, Channels).
+    const int b_out = _lora_rank * Channels;
+    for (int i = 0; i < b_out; i++)
+    {
+      float v = L.net_B_b[i];
+      const float* w = &L.net_B_w[static_cast<size_t>(i) * _num_params];
+      for (int j = 0; j < _num_params; j++)
+        v += w[j] * knobs[j];
+      _lora_B[li][i] = v;
+    }
+  }
+}
+
+// --- _apply_lora_frame: A @ (B @ a), added into lin -- see LoRA::Process in NAM/lora.h ---
+template <int Channels>
+void ParametricA2FastModel<Channels>::_apply_lora_frame(int li, const float* NAM_RESTRICT a,
+                                                         float* NAM_RESTRICT lin) const
+{
+  if (_lora_rank <= 0)
+    return;
+  const float* NAM_RESTRICT A = _lora_A[li].data(); // Channels x rank, row-major: A[c*rank+r]
+  const float* NAM_RESTRICT B = _lora_B[li].data(); // rank x Channels, row-major: B[r*Channels+c]
+  float bx[kMaxLoraRank];
+  for (int r = 0; r < _lora_rank; r++)
+  {
+    float s = 0.0f;
+    const float* NAM_RESTRICT Brow = B + static_cast<size_t>(r) * Channels;
+    for (int c = 0; c < Channels; c++)
+      s += Brow[c] * a[c];
+    bx[r] = s;
+  }
+  for (int c = 0; c < Channels; c++)
+  {
+    float s = 0.0f;
+    const float* NAM_RESTRICT Arow = A + static_cast<size_t>(c) * _lora_rank;
+    for (int r = 0; r < _lora_rank; r++)
+      s += Arow[r] * bx[r];
+    lin[c] += s;
+  }
+}
+
 // --- Buffer sizing ---
 template <int Channels>
 void ParametricA2FastModel<Channels>::SetMaxBufferSize(int maxBufferSize)
@@ -2214,6 +2365,7 @@ void ParametricA2FastModel<Channels>::SetMaxBufferSize(int maxBufferSize)
   _z.assign(static_cast<size_t>(Channels) * maxBufferSize, 0.0f);
   _cond.assign(static_cast<size_t>(maxBufferSize), 0.0f);
   _head_out.assign(static_cast<size_t>(maxBufferSize), 0.0f);
+  _lora_bx_scratch.assign(static_cast<size_t>(kMaxLoraRank) * maxBufferSize, 0.0f);
 
   for (auto& L : _layers)
   {
@@ -2419,6 +2571,13 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       lin[0] += lb0 + lw00*a0 + lw10*a1 + lw20*a2;
       lin[1] += lb1 + lw01*a0 + lw11*a1 + lw21*a2;
       lin[2] += lb2 + lw02*a0 + lw12*a1 + lw22*a2;
+      // [Fork] Optional layer1x1 LoRA: additive low-rank update on the SAME post-
+      // activation `a` layer1x1 just consumed, added into lin -- see _apply_lora_frame.
+      if (_lora_rank > 0)
+      {
+        const float a[3] = {a0, a1, a2};
+        _apply_lora_frame(li, a, lin);
+      }
     }
   }
   // [Fork] BEGIN: hand-unrolled Channels==4 kernel, mirrors the Channels==3 branch
@@ -2527,6 +2686,11 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       lin[1] += lb1 + lw01 * a0 + lw11 * a1 + lw21 * a2 + lw31 * a3;
       lin[2] += lb2 + lw02 * a0 + lw12 * a1 + lw22 * a2 + lw32 * a3;
       lin[3] += lb3 + lw03 * a0 + lw13 * a1 + lw23 * a2 + lw33 * a3;
+      if (_lora_rank > 0)
+      {
+        const float a[4] = {a0, a1, a2, a3};
+        _apply_lora_frame(li, a, lin);
+      }
     }
   }
   // [Fork] END: hand-unrolled Channels==4 kernel
@@ -2642,6 +2806,11 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       lin[2] += lb2 + lw02 * a0 + lw12 * a1 + lw22 * a2 + lw32 * a3 + lw42 * a4;
       lin[3] += lb3 + lw03 * a0 + lw13 * a1 + lw23 * a2 + lw33 * a3 + lw43 * a4;
       lin[4] += lb4 + lw04 * a0 + lw14 * a1 + lw24 * a2 + lw34 * a3 + lw44 * a4;
+      if (_lora_rank > 0)
+      {
+        const float a[5] = {a0, a1, a2, a3, a4};
+        _apply_lora_frame(li, a, lin);
+      }
     }
   }
   // [Fork] END: hand-unrolled Channels==5 kernel
@@ -2769,6 +2938,11 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       lin[3] += lb3 + lw03 * a0 + lw13 * a1 + lw23 * a2 + lw33 * a3 + lw43 * a4 + lw53 * a5;
       lin[4] += lb4 + lw04 * a0 + lw14 * a1 + lw24 * a2 + lw34 * a3 + lw44 * a4 + lw54 * a5;
       lin[5] += lb5 + lw05 * a0 + lw15 * a1 + lw25 * a2 + lw35 * a3 + lw45 * a4 + lw55 * a5;
+      if (_lora_rank > 0)
+      {
+        const float a[6] = {a0, a1, a2, a3, a4, a5};
+        _apply_lora_frame(li, a, lin);
+      }
     }
   }
   // [Fork] END: hand-unrolled Channels==6 kernel
@@ -2908,10 +3082,21 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       lin[4] += lb4 + lw04 * a0 + lw14 * a1 + lw24 * a2 + lw34 * a3 + lw44 * a4 + lw54 * a5 + lw64 * a6;
       lin[5] += lb5 + lw05 * a0 + lw15 * a1 + lw25 * a2 + lw35 * a3 + lw45 * a4 + lw55 * a5 + lw65 * a6;
       lin[6] += lb6 + lw06 * a0 + lw16 * a1 + lw26 * a2 + lw36 * a3 + lw46 * a4 + lw56 * a5 + lw66 * a6;
+      if (_lora_rank > 0)
+      {
+        const float a[7] = {a0, a1, a2, a3, a4, a5, a6};
+        _apply_lora_frame(li, a, lin);
+      }
     }
   }
   // [Fork] END: hand-unrolled Channels==7 kernel
 
+  // [Fork] Channels==8 hand-unrolled kernel (restored -- the Eigen-batched version below
+  // measured faster in a synthetic standalone benchmark but did NOT reduce real in-app DSP%
+  // (Instruments still showed ~34%, unchanged from before the LoRA port, even after removing
+  // a heap allocation from the Eigen LoRA path). Reverting Channels==8 to hand-unrolled,
+  // mirroring Channels==3..7 above, so the real app can be re-measured against a path that's
+  // at least architecturally consistent with the other widths pending further investigation.
   else if constexpr (Channels == 8)
   {
     // Preload per-layer FiLM coefficients (constant across all frames in this buffer).
@@ -3060,10 +3245,26 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
       lin[5] += lb5 + lw05 * a0 + lw15 * a1 + lw25 * a2 + lw35 * a3 + lw45 * a4 + lw55 * a5 + lw65 * a6 + lw75 * a7;
       lin[6] += lb6 + lw06 * a0 + lw16 * a1 + lw26 * a2 + lw36 * a3 + lw46 * a4 + lw56 * a5 + lw66 * a6 + lw76 * a7;
       lin[7] += lb7 + lw07 * a0 + lw17 * a1 + lw27 * a2 + lw37 * a3 + lw47 * a4 + lw57 * a5 + lw67 * a6 + lw77 * a7;
+      if (_lora_rank > 0)
+      {
+        const float a[8] = {a0, a1, a2, a3, a4, a5, a6, a7};
+        _apply_lora_frame(li, a, lin);
+      }
     }
   }
   // [Fork] END: hand-unrolled Channels==8 kernel
 
+  // [Fork] Fallback for any width outside 3-8 -- never reached in practice, since
+  // is_parametric_a2_shape only accepts 3-8 and all of those now have hand-unrolled
+  // branches above. Kept as a dead-but-correct safety net (and as a reference/rollback
+  // point): this batches everything -- conv, FiLM, LeakyReLU, skip-sum, l1x1, LoRA -- as
+  // GEMM/elementwise ops over the whole (Channels x num_frames) tile at once, matching how
+  // NAM/film.h and NAM/lora.h process the generic path. A synthetic standalone benchmark
+  // measured this ~1.15-1.3x faster than generic for the shipped 8-channel film+lora model
+  // (vs. ~0.6x, i.e. slower, for the hand-unrolled version) -- but real in-app Instruments
+  // measurement showed the opposite (34% DSP, worse than before the LoRA port, unchanged
+  // even after removing a heap allocation from this path's LoRA GEMM). Channels==8 was
+  // reverted to hand-unrolled above pending that discrepancy being understood.
   else
   {
     using MatCC  = Eigen::Matrix<float, Channels, Channels>;
@@ -3108,6 +3309,22 @@ void ParametricA2FastModel<Channels>::_layer_forward_k(Layer& L, int li, const f
     // layer1x1 residual.
     lin_block.noalias() += l1x1_mat * ztile;
     lin_block.colwise() += l1x1_b_vec;
+    // [Fork] Optional layer1x1 LoRA: correction = A @ (B @ ztile), added into lin_block --
+    // same math as _apply_lora_frame's per-frame version and NAM/lora.h's Process(), just
+    // batched as two small GEMMs over the whole buffer instead of a per-frame GEMV.
+    if (_lora_rank > 0)
+    {
+      using MatRankByC = Eigen::Matrix<float, Eigen::Dynamic, Channels, Eigen::RowMajor>;
+      using MatCByRank = Eigen::Matrix<float, Channels, Eigen::Dynamic, Eigen::RowMajor>;
+      Eigen::Map<const MatRankByC> B_mat(_lora_B[li].data(), _lora_rank, Channels);
+      Eigen::Map<const MatCByRank> A_mat(_lora_A[li].data(), Channels, _lora_rank);
+      // Preallocated scratch (see _lora_bx_scratch) -- no per-call heap allocation on the
+      // audio thread. Sized kMaxLoraRank x maxBufferSize; only the first _lora_rank rows x
+      // num_frames cols are used/written here.
+      Eigen::Map<Eigen::MatrixXf, Eigen::Aligned16> bx(_lora_bx_scratch.data(), _lora_rank, num_frames);
+      bx.noalias() = B_mat * ztile; // (rank x num_frames)
+      lin_block.noalias() += A_mat * bx;
+    }
   }
 }
 
@@ -3162,6 +3379,9 @@ void ParametricA2FastModel<Channels>::process(NAM_SAMPLE** input, NAM_SAMPLE** o
 
   // Rebuild per-layer gamma/beta from knob atomics (cheap: 23 × num_params × 2C FMAs).
   _recompute_film();
+  // Rebuild per-layer LoRA A/B from the same knob atomics. No-op if the model has no
+  // LoRA block (_lora_rank == 0), so FiLM-only models pay nothing extra here.
+  _recompute_lora();
 
   const NAM_SAMPLE* in0 = input[0];
   NAM_SAMPLE* out0 = output[0];
@@ -3212,13 +3432,14 @@ struct ParametricA2FastConfig : public ModelConfig
 {
   int channels = 0;
   int num_params = 0;
+  int lora_rank = 0; // 0 = FiLM-only, no LoRA block
   std::vector<ParametricParam> param_defs;
 
   template <int C>
   std::unique_ptr<DSP> _make(std::vector<float>&& weights, double sampleRate)
   {
     return std::make_unique<ParametricA2FastModel<C>>(std::move(weights), sampleRate,
-                                                      num_params, param_defs);
+                                                      num_params, param_defs, lora_rank);
   }
 
   std::unique_ptr<DSP> create(std::vector<float> weights, double sampleRate) override
@@ -3415,7 +3636,8 @@ std::unique_ptr<ModelConfig> create_a2_fast_config(const nlohmann::json& config,
 // ParametricWaveNet detector: config["layers"] is an integer (channel count), not an array.
 // All ParametricWaveNet models currently use the A2 topology, so the only check beyond
 // "channels in the supported fast-path set" is that a valid parametric block is present.
-bool is_parametric_a2_shape(const nlohmann::json& config, int* channels, int* num_params)
+bool is_parametric_a2_shape(const nlohmann::json& config, int* channels, int* num_params,
+                            int* lora_rank)
 {
   auto layers_it = config.find("layers");
   if (layers_it == config.end() || !layers_it->is_number_integer())
@@ -3432,21 +3654,36 @@ bool is_parametric_a2_shape(const nlohmann::json& config, int* channels, int* nu
   if (np <= 0 || np > ParametricWaveNet::kMaxParams)
     return false;
 
-  // [Fork] LoRA exclusion: this fast path is a fully separate, hand-optimized
-  // reimplementation of the parametric A2 forward pass with ZERO shared code with the
-  // generic Layer/FiLM/Conv1x1/LoRA classes. It has no LoRA support and never will (LoRA
-  // is meant for the slower-but-topology-agnostic generic path). Repurposes the "type"
-  // field Python already writes into config["parametric"] (param_train.py's export_nam) --
-  // "film" (or absent, for every export before this field existed) takes the fast path;
-  // "film+lora" (or anything else unrecognized) falls through to the generic path instead.
+  // [Fork] Repurposes the "type" field Python already writes into config["parametric"]
+  // (param_train.py's export_nam): "film" (or absent, for every export before this field
+  // existed) is the plain-FiLM shape; "film+lora" adds the layer1x1 LoRA update below (see
+  // LoRA in NAM/lora.h). Anything else unrecognized falls through to the generic path.
   // Fails safe: an absent key defaults to "film", so no pre-existing export is affected.
-  if (param_it->value("type", std::string("film")) != "film")
+  const std::string type = param_it->value("type", std::string("film"));
+  int rank = 0;
+  if (type == "film+lora")
+  {
+    // schema_version 2 is what LoRA-enabled exports declare (kMaxParametricSchemaVersion in
+    // parametric_wavenet.h); a "film+lora" type without it is a config this build doesn't
+    // fully understand -- fall through to the generic path rather than guess.
+    if (param_it->value("schema_version", 0) != 2)
+      return false;
+    auto lora_it = param_it->find("lora");
+    if (lora_it == param_it->end() || !lora_it->is_object())
+      return false;
+    rank = lora_it->value("rank", 0);
+    if (rank <= 0)
+      return false;
+  }
+  else if (type != "film")
     return false;
 
   if (channels)
     *channels = ch;
   if (num_params)
     *num_params = np;
+  if (lora_rank)
+    *lora_rank = rank;
   return true;
 }
 
@@ -3454,8 +3691,8 @@ std::unique_ptr<ModelConfig> create_parametric_a2_fast_config(const nlohmann::js
                                                                double sampleRate)
 {
   (void)sampleRate;
-  int ch = 0, np = 0;
-  if (!is_parametric_a2_shape(config, &ch, &np))
+  int ch = 0, np = 0, rank = 0;
+  if (!is_parametric_a2_shape(config, &ch, &np, &rank))
     throw std::runtime_error("create_parametric_a2_fast_config: config does not match parametric A2 shape");
 
   // Validate required fields (match the slow path's error contract).
@@ -3495,6 +3732,7 @@ std::unique_ptr<ModelConfig> create_parametric_a2_fast_config(const nlohmann::js
   auto out = std::make_unique<ParametricA2FastConfig>();
   out->channels   = ch;
   out->num_params = np;
+  out->lora_rank  = rank;
   out->param_defs = std::move(param_defs);
   return out;
 }

@@ -387,7 +387,9 @@ int main()
   test_a2_fast::test_detector_matches_width7();
   test_a2_fast::test_detector_matches_standard();
   test_a2_fast::test_parametric_detector_matches_supported_widths();
-  test_a2_fast::test_parametric_detector_excludes_lora();
+  test_a2_fast::test_parametric_detector_rejects_lora_without_schema_version();
+  test_a2_fast::test_parametric_detector_rejects_lora_without_rank();
+  test_a2_fast::test_parametric_detector_accepts_lora();
   test_a2_fast::test_parametric_detector_accepts_explicit_film_type();
   test_a2_fast::test_detector_accepts_nonstandard_head_scale();
   test_a2_fast::test_detector_rejects_wrong_channels();
@@ -414,6 +416,14 @@ int main()
   test_a2_fast::test_parametric_matches_generic_width6();
   test_a2_fast::test_parametric_matches_generic_width7();
   test_a2_fast::test_parametric_matches_generic_standard();
+  test_a2_fast::test_parametric_lora_matches_generic_nano();
+  test_a2_fast::test_parametric_lora_matches_generic_medium();
+  test_a2_fast::test_parametric_lora_matches_generic_width5();
+  test_a2_fast::test_parametric_lora_matches_generic_width6();
+  test_a2_fast::test_parametric_lora_matches_generic_width7();
+  test_a2_fast::test_parametric_lora_matches_generic_standard();
+  test_a2_fast::test_parametric_lora_matches_generic_rank_equals_channels();
+  test_a2_fast::test_parametric_no_lora_still_matches_generic();
   test_a2_fast::test_prewarm_matches_generic_nano();
   test_a2_fast::test_prewarm_matches_generic_standard();
   test_a2_fast::test_process_realtime_safe_nano();
@@ -441,7 +451,8 @@ int main()
   test_parametric_wavenet::test_unknown_head_mode_is_rejected();
   test_parametric_wavenet::test_newer_schema_version_is_rejected();
   test_parametric_wavenet::test_skip_model_loads_and_takes_fast_path();
-  test_parametric_wavenet::test_lora_tagged_model_takes_generic_path();
+  test_parametric_wavenet::test_complete_lora_tagged_model_takes_fast_path();
+  test_parametric_wavenet::test_incomplete_lora_tagged_model_takes_generic_path();
   test_parametric_wavenet::test_explicit_film_type_still_takes_fast_path();
   test_parametric_wavenet::test_config_parse_valid_json();
   test_parametric_wavenet::test_config_parse_missing_layers_throws();

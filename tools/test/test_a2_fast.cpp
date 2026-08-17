@@ -230,6 +230,33 @@ void compare_parametric(const std::vector<NAM_SAMPLE>& a, const std::vector<NAM_
 }
 // [Fork] END: parametric fast-path numerical verification helpers
 
+// [Fork] BEGIN: LoRA fast-path numerical verification helpers
+// Same as build_parametric_a2_config, but tagged "film+lora" with a rank>0 LoRA block --
+// matches the JSON shape param_train.py's export_nam writes for a LoRA-enabled model.
+nlohmann::json build_parametric_a2_lora_config(int channels, int num_params, int rank)
+{
+  nlohmann::json cfg = build_parametric_a2_config(channels, num_params);
+  cfg["parametric"]["type"] = "film+lora";
+  cfg["parametric"]["schema_version"] = 2;
+  cfg["parametric"]["lora"]["rank"] = rank;
+  return cfg;
+}
+
+// Weight count for a LoRA-enabled ParametricWaveNet A2 layer array: the plain-FiLM count
+// plus, per layer, net_A (num_params -> channels*rank, with bias) and net_B (num_params ->
+// rank*channels, with bias) -- per the WEIGHT LAYOUT documented in parametric_wavenet.h and
+// _load_weights' read order in a2_fast.cpp (net_A weight+bias, then net_B weight+bias).
+int parametric_a2_lora_weight_count(int channels, int num_params, int rank)
+{
+  int total = parametric_a2_weight_count(channels, num_params);
+  const int a_out = channels * rank;
+  const int b_out = rank * channels;
+  total += nam::wavenet::a2_fast::kNumLayers * (a_out * num_params + a_out + b_out * num_params + b_out);
+  return total;
+}
+
+// [Fork] END: LoRA fast-path numerical verification helpers
+
 } // namespace
 
 void test_detector_matches_nano()
@@ -322,20 +349,58 @@ void test_parametric_detector_matches_supported_widths()
   assert(!nam::wavenet::a2_fast::is_parametric_a2_shape(cfg, nullptr, nullptr));
 }
 
-// [Fork] LoRA exclusion (Phase 4 of the LoRA plan): this fast path has zero LoRA support
-// and never will -- is_parametric_a2_shape() must reject any LoRA-tagged config so it
-// falls through to the slower-but-correct generic path instead of either crashing on a
-// weight-count mismatch or, worse, silently misassigning every downstream layer's weights.
-// See a2_fast.cpp's is_parametric_a2_shape() for the "type" field check this exercises.
-void test_parametric_detector_excludes_lora()
+// [Fork] LoRA fast path (see ParametricA2FastModel<Channels>'s _lora_* members / _recompute_lora /
+// _apply_lora_frame in a2_fast.cpp): is_parametric_a2_shape() accepts "film+lora" only when it can
+// fully understand the shape -- schema_version 2 AND a valid parametric.lora.rank. Anything short of
+// that (missing schema_version, missing/invalid rank) falls through to the generic path instead of
+// guessing, since a misread here would silently misassign every downstream layer's weights.
+void test_parametric_detector_rejects_lora_without_schema_version()
 {
-  // Otherwise-valid shape (channels=3, a supported fast-path width), but tagged "film+lora".
+  // Otherwise-valid shape (channels=3, a supported fast-path width), tagged "film+lora" but
+  // missing schema_version -- this is what every export written before schema_version existed
+  // (or a hand-edited config) would look like; must NOT be guessed as understood.
   nlohmann::json cfg;
   cfg["layers"] = 3;
   cfg["head_scale"] = 1.0f;
   cfg["parametric"]["condition_size"] = 1;
   cfg["parametric"]["type"] = "film+lora";
+  cfg["parametric"]["lora"]["rank"] = 4;
   assert(!nam::wavenet::a2_fast::is_parametric_a2_shape(cfg, nullptr, nullptr));
+}
+
+void test_parametric_detector_rejects_lora_without_rank()
+{
+  nlohmann::json cfg;
+  cfg["layers"] = 3;
+  cfg["head_scale"] = 1.0f;
+  cfg["parametric"]["condition_size"] = 1;
+  cfg["parametric"]["type"] = "film+lora";
+  cfg["parametric"]["schema_version"] = 2;
+  // No "lora" block at all.
+  assert(!nam::wavenet::a2_fast::is_parametric_a2_shape(cfg, nullptr, nullptr));
+
+  // "lora" present but rank is zero/invalid.
+  cfg["parametric"]["lora"]["rank"] = 0;
+  assert(!nam::wavenet::a2_fast::is_parametric_a2_shape(cfg, nullptr, nullptr));
+}
+
+void test_parametric_detector_accepts_lora()
+{
+  for (int channels : {3, 4, 5, 6, 7, 8})
+  {
+    nlohmann::json cfg;
+    cfg["layers"] = channels;
+    cfg["head_scale"] = 1.0f;
+    cfg["parametric"]["condition_size"] = 2;
+    cfg["parametric"]["type"] = "film+lora";
+    cfg["parametric"]["schema_version"] = 2;
+    cfg["parametric"]["lora"]["rank"] = 4;
+    int ch = 0, np = 0, rank = 0;
+    assert(nam::wavenet::a2_fast::is_parametric_a2_shape(cfg, &ch, &np, &rank));
+    assert(ch == channels);
+    assert(np == 2);
+    assert(rank == 4);
+  }
 }
 
 void test_parametric_detector_accepts_explicit_film_type()
@@ -885,6 +950,63 @@ void test_parametric_knob_smoothing_recalibrates_after_implicit_resize()
   assert(diff_settled < 1e-5);
 }
 // [Fork] END: knob smoothing recalibrates after an implicit buffer-size grow
+
+void test_parametric_lora_matches_generic(int channels, int num_params, int rank)
+{
+  const auto cfg = build_parametric_a2_lora_config(channels, num_params, rank);
+  const int weight_count = parametric_a2_lora_weight_count(channels, num_params, rank);
+  const auto weights =
+    make_deterministic_weights(weight_count, /*seed=*/0x10Ba0000u + channels * 1000 + num_params * 10 + rank);
+
+  // Fast path: build through the explicit parametric A2 factory (now LoRA-aware).
+  auto fast_cfg = nam::wavenet::a2_fast::create_parametric_a2_fast_config(cfg, 48000.0);
+  std::vector<float> w_fast = weights;
+  auto fast_dsp = fast_cfg->create(std::move(w_fast), 48000.0);
+
+  // Generic path: the reference ParametricWaveNet, which already has LoRA support.
+  auto generic_cfg = nam::wavenet::create_parametric_config_generic(cfg, 48000.0);
+  std::vector<float> w_gen = weights;
+  auto generic_dsp = generic_cfg->create(std::move(w_gen), 48000.0);
+
+  // Non-default knobs so both FiLM and LoRA are genuinely exercised, not just their
+  // all-zero/default-knob case.
+  std::vector<float> knobs(num_params);
+  for (int i = 0; i < num_params; i++)
+    knobs[i] = 0.2f + 0.6f * (static_cast<float>(i) / std::max(1, num_params));
+  fast_dsp->SetKnobValues(knobs);
+  generic_dsp->SetKnobValues(knobs);
+
+  const int total = 2048;
+  const auto input = make_test_input(total, 48000.0);
+  for (int block : {64, 256})
+  {
+    const auto out_generic = run_dsp(*generic_dsp, input, block);
+    const auto out_fast = run_dsp(*fast_dsp, input, block);
+    compare_parametric(out_generic, out_fast, channels, block, /*tol=*/5e-5);
+  }
+}
+
+void test_parametric_lora_matches_generic_nano()     { test_parametric_lora_matches_generic(3, 2, 2); }
+void test_parametric_lora_matches_generic_medium()   { test_parametric_lora_matches_generic(4, 2, 4); }
+void test_parametric_lora_matches_generic_width5()   { test_parametric_lora_matches_generic(5, 2, 3); }
+void test_parametric_lora_matches_generic_width6()   { test_parametric_lora_matches_generic(6, 2, 3); }
+void test_parametric_lora_matches_generic_width7()   { test_parametric_lora_matches_generic(7, 2, 5); }
+void test_parametric_lora_matches_generic_standard() { test_parametric_lora_matches_generic(8, 2, 4); }
+
+// rank == channels is a real case (the shipped Tweed 5F6-A 2-knob LoRA model's lite tier is
+// channels=4, rank=4) -- the A@(Bx) correction is then comparable in size to layer1x1 itself,
+// not a small add-on, worth its own explicit coverage rather than only ranks << channels.
+void test_parametric_lora_matches_generic_rank_equals_channels()
+{
+  test_parametric_lora_matches_generic(4, 2, 4);
+}
+
+// A non-LoRA (FiLM-only) model must still take the fast path and produce identical output
+// to before this change -- LoRA support must be additive, never regress the existing case.
+void test_parametric_no_lora_still_matches_generic()
+{
+  test_parametric_matches_generic(8, 2);
+}
 
 } // namespace test_a2_fast
 
