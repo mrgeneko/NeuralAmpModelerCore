@@ -3432,6 +3432,17 @@ bool is_parametric_a2_shape(const nlohmann::json& config, int* channels, int* nu
   if (np <= 0 || np > ParametricWaveNet::kMaxParams)
     return false;
 
+  // [Fork] LoRA exclusion: this fast path is a fully separate, hand-optimized
+  // reimplementation of the parametric A2 forward pass with ZERO shared code with the
+  // generic Layer/FiLM/Conv1x1/LoRA classes. It has no LoRA support and never will (LoRA
+  // is meant for the slower-but-topology-agnostic generic path). Repurposes the "type"
+  // field Python already writes into config["parametric"] (param_train.py's export_nam) --
+  // "film" (or absent, for every export before this field existed) takes the fast path;
+  // "film+lora" (or anything else unrecognized) falls through to the generic path instead.
+  // Fails safe: an absent key defaults to "film", so no pre-existing export is affected.
+  if (param_it->value("type", std::string("film")) != "film")
+    return false;
+
   if (channels)
     *channels = ch;
   if (num_params)

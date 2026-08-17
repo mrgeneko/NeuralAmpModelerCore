@@ -12,6 +12,7 @@
 #include "../conv1d.h"
 #include "../gating_activations.h"
 #include "../film.h"
+#include "../lora.h"
 
 namespace nam
 {
@@ -67,6 +68,11 @@ public:
       if (params._layer1x1_post_film_params.active)
       {
         throw std::invalid_argument("layer1x1_post_film cannot be active when layer1x1 is not active");
+      }
+      // Same redundancy check for the layer1x1 LoRA update -- it has nothing to update without layer1x1.
+      if (params.layer1x1_lora_params.active)
+      {
+        throw std::invalid_argument("layer1x1 lora cannot be active when layer1x1 is not active");
       }
     }
 
@@ -148,6 +154,11 @@ public:
       _layer1x1_post_film =
         std::make_unique<FiLM>(params.film_condition_size, params.channels, params._layer1x1_post_film_params.shift,
                                params._layer1x1_post_film_params.groups);
+    }
+    if (params.layer1x1_lora_params.active && params.layer1x1_params.active)
+    {
+      _layer1x1_lora =
+        std::make_unique<LoRA>(params.film_condition_size, params.channels, params.layer1x1_lora_params.rank);
     }
     if (params.head1x1_post_film_params.active && params.head1x1_params.active)
     {
@@ -267,6 +278,10 @@ private:
   std::unique_ptr<FiLM> _activation_post_film;
   std::unique_ptr<FiLM> _layer1x1_post_film;
   std::unique_ptr<FiLM> _head1x1_post_film;
+
+  // Optional low-rank ("LoRA-style") additive weight update on layer1x1's output, alongside
+  // (not instead of) _layer1x1_post_film. See NAM/lora.h.
+  std::unique_ptr<LoRA> _layer1x1_lora;
 };
 
 /// \brief An array of layers with the same channels, kernel sizes, and activations

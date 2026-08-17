@@ -43,12 +43,16 @@
 // Per layer (23 layers total), weights are consumed in this order by Layer::set_weights_:
 //   conv.weight  conv.bias  mixin.weight  l1x1.weight  l1x1.bias
 //   film.net.weight  film.net.bias
+//   [optional, only when config["parametric"]["lora"] is present:]
+//   lora.net_A.weight  lora.net_A.bias  lora.net_B.weight  lora.net_B.bias
 //
 // After all layers, consumed by LayerArray::set_weights_ and WaveNet::set_weights_:
 //   head_rechannel.weight  head_rechannel.bias  head_scale
 //
 // No special weight loading code is needed — this layout matches the existing
-// Layer::set_weights_ order (conv → mixin → l1x1 → activation_pre_film).
+// Layer::set_weights_ order (conv → mixin → l1x1 → activation_pre_film → layer1x1 lora),
+// mirroring param_train.py's _export_weight_block/_load_weight_block order (lora branch
+// immediately follows the film branch).
 //
 // THREAD SAFETY
 // =============
@@ -105,7 +109,12 @@ struct ParametricParam
 //                      residual model -- is rejected.
 
 /// \brief Highest config["parametric"]["schema_version"] this build understands.
-constexpr int kMaxParametricSchemaVersion = 1;
+///
+/// 1 = FiLM-only (original). 2 = adds the optional config["parametric"]["lora"] block
+/// (see LoRA in NAM/lora.h and the WEIGHT LAYOUT comment above) -- schema_version 2 is
+/// declared ONLY by a LoRA-enabled export (param_train.py's K_PARAM_SCHEMA_VERSION_LORA);
+/// every plain FiLM-only export still declares schema_version 1, unaffected.
+constexpr int kMaxParametricSchemaVersion = 2;
 
 /// \brief Validate a parametric model is loadable: known schema, and a SKIP head.
 ///
