@@ -283,12 +283,17 @@ void nam::wavenet::detail::Layer::Process(const Eigen::MatrixXf& input, const Ei
     if (this->_layer1x1)
     {
       this->_layer1x1->process_(this->_z.topRows(bottleneck), num_frames);
-      if (this->_layer1x1_post_film)
-      {
-        Eigen::MatrixXf& layer1x1_output = this->_layer1x1->GetOutput();
-        this->_layer1x1_post_film->Process_(layer1x1_output, fc, num_frames);
-      }
     }
+  }
+
+  // layer1x1_post_film is independent of the gating mode and must be applied whenever
+  // layer1x1 is active (upstream sdatkinson/NeuralAmpModelerCore#321/#322, pulled in
+  // 2026-08-25: previously this only ran inside the BLENDED branch above, so
+  // GatingMode::NONE and GatingMode::GATED layers silently dropped the FiLM modulation).
+  if (this->_layer1x1 && this->_layer1x1_post_film)
+  {
+    Eigen::MatrixXf& layer1x1_output = this->_layer1x1->GetOutput();
+    this->_layer1x1_post_film->Process_(layer1x1_output, fc, num_frames);
   }
 
   if (this->_head1x1)
