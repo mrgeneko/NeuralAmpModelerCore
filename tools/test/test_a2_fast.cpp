@@ -286,10 +286,10 @@ void test_detector_accepts_nonstandard_head_scale()
 
 void test_detector_rejects_wrong_channels()
 {
-  // 9 is outside the supported fast-path set {3, 4, 5, 6, 7, 8}.
+  // 10 is outside the supported fast-path set {3, 4, 5, 6, 7, 8, 9}.
   auto cfg = build_a2_config(3);
-  cfg["layers"][0]["channels"] = 9;
-  cfg["layers"][0]["bottleneck"] = 9;
+  cfg["layers"][0]["channels"] = 10;
+  cfg["layers"][0]["bottleneck"] = 10;
   assert(!nam::wavenet::a2_fast::is_a2_shape(cfg, nullptr));
 }
 
@@ -327,9 +327,19 @@ void test_detector_matches_width7()
 }
 // [Fork] END: widths 5, 6, 7
 
+// [Fork] BEGIN: width 9
+void test_detector_matches_width9()
+{
+  auto cfg = build_a2_config(9);
+  int ch = 0;
+  assert(nam::wavenet::a2_fast::is_a2_shape(cfg, &ch));
+  assert(ch == 9);
+}
+// [Fork] END: width 9
+
 void test_parametric_detector_matches_supported_widths()
 {
-  for (int channels : {3, 4, 5, 6, 7, 8})
+  for (int channels : {3, 4, 5, 6, 7, 8, 9})
   {
     nlohmann::json cfg;
     cfg["layers"] = channels;
@@ -341,9 +351,9 @@ void test_parametric_detector_matches_supported_widths()
     assert(np == 1);
   }
 
-  // 9 is outside the supported fast-path set {3, 4, 5, 6, 7, 8}.
+  // 10 is outside the supported fast-path set {3, 4, 5, 6, 7, 8, 9}.
   nlohmann::json cfg;
-  cfg["layers"] = 9;
+  cfg["layers"] = 10;
   cfg["head_scale"] = 1.0f;
   cfg["parametric"]["condition_size"] = 1;
   assert(!nam::wavenet::a2_fast::is_parametric_a2_shape(cfg, nullptr, nullptr));
@@ -525,6 +535,13 @@ void test_matches_generic_standard()
   test_matches_generic(8);
 }
 
+// [Fork] BEGIN: width 9
+void test_matches_generic_width9()
+{
+  test_matches_generic(9);
+}
+// [Fork] END: width 9
+
 // [Fork] BEGIN: parametric fast-path numerical verification (mirrors
 // test_matches_generic above, but for ParametricA2FastModel vs. the generic
 // ParametricWaveNet reference exposed via create_parametric_config_generic()).
@@ -608,6 +625,7 @@ void test_parametric_skip_matches_generic_width5()   { test_parametric_skip_matc
 void test_parametric_skip_matches_generic_width6()   { test_parametric_skip_matches_generic(6, 2); }
 void test_parametric_skip_matches_generic_width7()   { test_parametric_skip_matches_generic(7, 2); }
 void test_parametric_skip_matches_generic_standard() { test_parametric_skip_matches_generic(8, 2); }
+void test_parametric_skip_matches_generic_width9()   { test_parametric_skip_matches_generic(9, 2); }
 
 // [Fork] END: SKIP-head parametric fast-path verification
 
@@ -642,6 +660,13 @@ void test_parametric_matches_generic_standard()
 {
   test_parametric_matches_generic(8, 2);
 }
+
+// [Fork] BEGIN: width 9
+void test_parametric_matches_generic_width9()
+{
+  test_parametric_matches_generic(9, 2);
+}
+// [Fork] END: width 9
 // [Fork] END: parametric fast-path numerical verification
 
 // The fast path must report the same prewarm count as the generic WaveNet it
@@ -762,6 +787,13 @@ void test_process_realtime_safe_standard()
 {
   test_process_realtime_safe(8);
 }
+
+// [Fork] BEGIN: width 9
+void test_process_realtime_safe_width9()
+{
+  test_process_realtime_safe(9);
+}
+// [Fork] END: width 9
 
 // [Fork] BEGIN: per-buffer knob smoothing convergence test (Gap 1).
 //
@@ -992,6 +1024,7 @@ void test_parametric_lora_matches_generic_width5()   { test_parametric_lora_matc
 void test_parametric_lora_matches_generic_width6()   { test_parametric_lora_matches_generic(6, 2, 3); }
 void test_parametric_lora_matches_generic_width7()   { test_parametric_lora_matches_generic(7, 2, 5); }
 void test_parametric_lora_matches_generic_standard() { test_parametric_lora_matches_generic(8, 2, 4); }
+void test_parametric_lora_matches_generic_width9()   { test_parametric_lora_matches_generic(9, 2, 4); }
 
 // rank == channels is a real case (the shipped Tweed 5F6-A 2-knob LoRA model's lite tier is
 // channels=4, rank=4) -- the A@(Bx) correction is then comparable in size to layer1x1 itself,

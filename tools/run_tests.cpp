@@ -387,6 +387,7 @@ int main()
   test_a2_fast::test_detector_matches_width6();
   test_a2_fast::test_detector_matches_width7();
   test_a2_fast::test_detector_matches_standard();
+  test_a2_fast::test_detector_matches_width9();
   test_a2_fast::test_parametric_detector_matches_supported_widths();
   test_a2_fast::test_parametric_detector_rejects_lora_without_schema_version();
   test_a2_fast::test_parametric_detector_rejects_lora_without_rank();
@@ -405,24 +406,28 @@ int main()
   test_a2_fast::test_matches_generic_width6();
   test_a2_fast::test_matches_generic_width7();
   test_a2_fast::test_matches_generic_standard();
+  test_a2_fast::test_matches_generic_width9();
   test_a2_fast::test_parametric_skip_matches_generic_nano();
   test_a2_fast::test_parametric_skip_matches_generic_medium();
   test_a2_fast::test_parametric_skip_matches_generic_width5();
   test_a2_fast::test_parametric_skip_matches_generic_width6();
   test_a2_fast::test_parametric_skip_matches_generic_width7();
   test_a2_fast::test_parametric_skip_matches_generic_standard();
+  test_a2_fast::test_parametric_skip_matches_generic_width9();
   test_a2_fast::test_parametric_matches_generic_nano();
   test_a2_fast::test_parametric_matches_generic_medium();
   test_a2_fast::test_parametric_matches_generic_width5();
   test_a2_fast::test_parametric_matches_generic_width6();
   test_a2_fast::test_parametric_matches_generic_width7();
   test_a2_fast::test_parametric_matches_generic_standard();
+  test_a2_fast::test_parametric_matches_generic_width9();
   test_a2_fast::test_parametric_lora_matches_generic_nano();
   test_a2_fast::test_parametric_lora_matches_generic_medium();
   test_a2_fast::test_parametric_lora_matches_generic_width5();
   test_a2_fast::test_parametric_lora_matches_generic_width6();
   test_a2_fast::test_parametric_lora_matches_generic_width7();
   test_a2_fast::test_parametric_lora_matches_generic_standard();
+  test_a2_fast::test_parametric_lora_matches_generic_width9();
   test_a2_fast::test_parametric_lora_matches_generic_rank_equals_channels();
   test_a2_fast::test_parametric_no_lora_still_matches_generic();
   test_a2_fast::test_prewarm_matches_generic_nano();
@@ -433,6 +438,7 @@ int main()
   test_a2_fast::test_process_realtime_safe_width6();
   test_a2_fast::test_process_realtime_safe_width7();
   test_a2_fast::test_process_realtime_safe_standard();
+  test_a2_fast::test_process_realtime_safe_width9();
 
   // [Fork] Knob smoothing convergence (Gap 1): proves the one-pole smoother
   // actually ramps rather than snapping instantly, and that it converges rather than
