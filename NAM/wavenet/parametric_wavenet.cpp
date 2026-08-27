@@ -208,25 +208,6 @@ std::unique_ptr<ModelConfig> create_parametric_config_generic(const nlohmann::js
     throw std::runtime_error(ss.str());
   }
 
-  // --- Optional LoRA block (schema_version 2; see kMaxParametricSchemaVersion) ---
-  // Absent key => inactive, so every pre-LoRA export (schema_version 1, no "lora" key)
-  // parses exactly as before -- default-inactive _LoRAParams, matching every other
-  // optional feature in this parser.
-  int lora_rank = 0;
-  if (param_block.contains("lora"))
-  {
-    const auto& lora_json = param_block["lora"];
-    if (!lora_json.is_object() || !lora_json.contains("rank"))
-      throw std::runtime_error("ParametricWaveNet: parametric.lora must be an object with a 'rank' field");
-    lora_rank = lora_json["rank"].get<int>();
-    if (lora_rank <= 0)
-    {
-      std::ostringstream ss;
-      ss << "ParametricWaveNet: parametric.lora.rank must be positive, got " << lora_rank;
-      throw std::runtime_error(ss.str());
-    }
-  }
-  const _LoRAParams layer1x1_lora_params(lora_rank > 0, lora_rank);
 
   std::vector<ParametricParam> param_defs;
   if (param_block.contains("parameters"))
@@ -305,8 +286,7 @@ std::unique_ptr<ModelConfig> create_parametric_config_generic(const nlohmann::js
     off,                   // activation_post_film
     off,                   // layer1x1_post_film
     off,                   // head1x1_post_film
-    /*film_condition_size=*/ num_params,             // knob count; sets FiLM condition_dim
-    layer1x1_lora_params);                           // optional layer1x1 LoRA (default-inactive)
+    /*film_condition_size=*/ num_params);           // knob count; sets FiLM condition_dim
     // Head input: the SUM of every layer's post-activation (standard WaveNet skip
     // connections). Skip-only -- LayerArray no longer carries a head-mode switch.
 

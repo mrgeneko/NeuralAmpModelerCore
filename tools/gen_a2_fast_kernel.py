@@ -179,16 +179,7 @@ def gen_parametric(N):
         lines.append(f"    const float {decls};")
     mw_decls = ", ".join(f"mw{i} = L.mixin_w[{i}]" for i in range(N))
     lines.append(f"    const float {mw_decls};")
-    # [Fork] LoRA: W_eff = W_base + A@B, folded once per buffer (see
-    # ParametricA2FastModel::_build_effective_l1x1 / 35456c9) -- an exact algebraic
-    # identity, not an approximation, since A/B are themselves buffer-constant.
     lines.append("    const float* NAM_RESTRICT l1x1_src = L.l1x1_w.data();")
-    lines.append("    float eff_l1x1_w[Channels * Channels];")
-    lines.append("    if (_lora_rank > 0)")
-    lines.append("    {")
-    lines.append("      _build_effective_l1x1(L, li, eff_l1x1_w);")
-    lines.append("      l1x1_src = eff_l1x1_w;")
-    lines.append("    }")
     for b in range(N):
         decls = ", ".join(f"lw{b}{c} = l1x1_src[{b*N+c}]" for c in range(N))
         lines.append(f"    const float {decls};")

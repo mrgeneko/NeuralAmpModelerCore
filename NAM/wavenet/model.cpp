@@ -130,8 +130,6 @@ void nam::wavenet::detail::Layer::SetMaxBufferSize(const int maxBufferSize)
     this->_layer1x1_post_film->SetMaxBufferSize(maxBufferSize);
   if (this->_head1x1_post_film)
     this->_head1x1_post_film->SetMaxBufferSize(maxBufferSize);
-  if (this->_layer1x1_lora)
-    this->_layer1x1_lora->SetMaxBufferSize(maxBufferSize);
 }
 
 void nam::wavenet::detail::Layer::set_weights_(std::vector<float>::iterator& weights)
@@ -165,9 +163,7 @@ void nam::wavenet::detail::Layer::set_weights_(std::vector<float>::iterator& wei
     this->_head1x1_post_film->set_weights_(weights);
   // Lands right after _activation_pre_film's weights in the byte stream for ParametricWaveNet
   // specifically -- that's the only FiLM location it ever activates, matching Python's
-  // _export_weight_block/_load_weight_block order (lora branch immediately follows film branch).
-  if (this->_layer1x1_lora)
-    this->_layer1x1_lora->set_weights_(weights);
+  // _export_weight_block/_load_weight_block order.
 }
 
 void nam::wavenet::detail::Layer::Process(const Eigen::MatrixXf& input, const Eigen::MatrixXf& condition,
@@ -235,16 +231,6 @@ void nam::wavenet::detail::Layer::Process(const Eigen::MatrixXf& input, const Ei
     if (this->_layer1x1)
     {
       this->_layer1x1->process_(this->_z, num_frames);
-      if (this->_layer1x1_lora)
-      {
-        // Additive low-rank update on the SAME post-activation input layer1x1 just consumed
-        // (this->_z, unchanged by the process_() call above). Adding directly into
-        // _layer1x1->GetOutput() means the residual computation below (input + layer1x1 output)
-        // picks up LoRA's contribution automatically, with no changes needed there.
-        this->_layer1x1_lora->Process(this->_z, fc, num_frames);
-        this->_layer1x1->GetOutput().leftCols(num_frames).noalias() +=
-          this->_layer1x1_lora->GetOutput().leftCols(num_frames);
-      }
     }
   }
   else if (this->_gating_mode == GatingMode::GATED)
@@ -420,8 +406,7 @@ nam::wavenet::detail::LayerArray::LayerArray(const LayerArrayParams& params)
       params.conv_pre_film_params, params.conv_post_film_params, params.input_mixin_pre_film_params,
       params.input_mixin_post_film_params, params.activation_pre_film_params, params.activation_post_film_params,
       params._layer1x1_post_film_params, params.head1x1_post_film_params,
-      params.film_condition_size, // propagate FiLM condition dim (equals condition_size for standard models)
-      params.layer1x1_lora_params); // propagate optional layer1x1 LoRA params (default-inactive)
+      params.film_condition_size); // propagate FiLM condition dim (equals condition_size for standard models)
     this->_layers.push_back(Layer(layer_params));
   }
 }

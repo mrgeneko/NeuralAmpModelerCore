@@ -22,29 +22,16 @@ all continue to work unchanged.
   fast path (`ParametricA2FastModel<Channels>`) exists alongside the generic path for channel widths 3–8,
   mirroring the non-parametric `A2FastModel` fast path this repo already had. See `NAM/wavenet/parametric_wavenet.h`
   and `NAM/wavenet/a2_fast.h`.
-* **LoRA-style knob conditioning**, optional and additive alongside FiLM (not a
-  replacement for it). Where FiLM only ever rescales one fixed backbone computation
-  (`gamma(cond)*x + beta(cond)`), LoRA adds a genuine per-knob weight *delta* on
-  `layer1x1` — `W_effective = W_base + A(cond)@B(cond)`, computed as two small matmuls
-  (`A @ (B @ x)`, the full `channels × channels` delta is never materialized) rather than
-  a rescale of a fixed computation. See `NAM/lora.h` (mirrors `NAM/film.h`'s structure
-  and RT-safety caching pattern exactly). Activated by an optional
-  `config["parametric"]["lora"]` block (`{"rank": N}`) that bumps
-  `config["parametric"]["schema_version"]` from 1 to 2 — `kMaxParametricSchemaVersion`
-  (`NAM/wavenet/parametric_wavenet.h`) gates this: an older build rejects a
-  schema-version-2 file loudly rather than silently misreading it. **The fast path now
-  supports LoRA too** — `ParametricA2FastModel` reimplements the same additive
-  `A(cond)@(B(cond)@x)` correction (`_apply_lora_frame` for channel widths 3-7's
-  hand-unrolled kernels; a batched Eigen GEMM path for anything outside 3-8, currently
-  unreachable in practice). `is_parametric_a2_shape()` (`NAM/wavenet/a2_fast.cpp`) accepts
-  `config["parametric"]["type"]` of `"film"` (or absent, for every export before this
-  field existed) or `"film+lora"` (requires `schema_version` 2 and a positive
-  `lora.rank`; malformed configs still fall back to the generic path). A FiLM-only
-  model's behavior and performance are unaffected by any of this — LoRA is fully gated on
-  `lora_rank > 0`. Numerically verified bit-for-bit against the generic reference across
-  channel widths 3-8, including the rank==channels edge case; measured (via Instruments,
-  in-app, not a synthetic benchmark) at roughly 20% -> 12% DSP for the shipped 8-channel
-  film+lora model.
+* **LoRA-style knob conditioning — REMOVED.** A `film+lora` mode (an additive per-knob
+  weight delta on `layer1x1`, `W_effective = W_base + A(cond)@B(cond)`) existed on both the
+  generic and fast paths between `cc0a4a8` and this removal. It was withdrawn because it never
+  paid off on shipped ESR: on the one device where both were trained, the FiLM-only bundle was
+  the better model, and widening a tier lifts the same capacity ceiling with no schema bump and
+  no minimum core version. `kMaxParametricSchemaVersion` is back to **1**, so a
+  `schema_version` 2 (`film+lora`) model is now **refused loudly** by
+  `require_supported_parametric_model()` rather than loaded with its LoRA weights silently
+  ignored. FiLM-only models — every model in use — are unaffected. See git history at
+  `cc0a4a8`/`35456c9` if it ever needs reviving.
 * **Slimmable / multi-tier models.** `ContainerModel` holds several submodels at different capacities
   (e.g. a small/fast tier and a large/accurate tier) and switches between them at runtime via
   `SetSlimmableSize()`. Adds `GetAllowedSizes()` (the discrete sizes/channel-counts a host can pick between)
