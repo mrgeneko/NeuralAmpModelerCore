@@ -400,6 +400,7 @@ int main()
   test_a2_fast::test_parametric_skip_matches_generic_width9();
   test_a2_fast::test_parametric_odd_block_sizes_match_generic_all_widths();
   test_a2_fast::test_matches_generic_odd_block_sizes_all_widths();
+  test_a2_fast::test_silence_gap_all_widths();
   test_a2_fast::test_parametric_matches_generic_nano();
   test_a2_fast::test_parametric_matches_generic_medium();
   test_a2_fast::test_parametric_matches_generic_width5();

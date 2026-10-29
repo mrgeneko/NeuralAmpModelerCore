@@ -22,6 +22,13 @@
 //   - FiLM (gamma * (conv + mixin + bias) + beta, then LeakyReLU) is applied inside the tile
 //     epilogue, before the activation is stored.
 //
+//   - Silence skip: once the input has been exactly zero (and FiLM unchanged) for longer than the
+//     receptive field, the network has no feedback, so every history holds one constant per row
+//     and the output is one constant. Later all-zero chunks are answered with that constant
+//     without running the network; the histories are first filled with their constants so a
+//     restart reads exactly what a full run would have left. Bit-identical to not skipping.
+//     Define NAM_A2_TILED_NO_SILENCE_SKIP to turn it off.
+//
 // Clean-room: written from the A2 layer shape and this fork's weight order. It borrows nothing
 // from other NAM engines.
 
@@ -105,6 +112,8 @@ public:
     cond_.assign(kChunk, 0.0f);
     out_.assign(kChunk, 0.0f);
     pos_ = 0;
+    havePrev_ = haveSteady_ = filled_ = false;
+    stableRun_ = 0;
   }
 
   /// Runs n frames (any n >= 0) and writes n float outputs, before any DC blocker. With FiLM:
@@ -134,10 +143,82 @@ public:
   }
 
 private:
+  // Frames of exact-zero input after which the whole network state is constant.
+  static constexpr unsigned receptiveField()
+  {
+    unsigned r = HK;
+    for (int li = 0; li < NL; ++li)
+      r += static_cast<unsigned>((kKernelSizes[li] - 1) * kDilations[li]);
+    return r;
+  }
+
   void run(const NAM_SAMPLE* in, float* out, int n)
   {
+#if defined(NAM_A2_TILED_NO_SILENCE_SKIP)
     for (int done = 0; done < n; done += kChunk)
       chunk(in + done, out + done, std::min(kChunk, n - done));
+#else
+    const bool filmSame = havePrev_ && std::memcmp(gam_, prevGam_, sizeof(gam_)) == 0
+                          && std::memcmp(bet_, prevBet_, sizeof(bet_)) == 0;
+    std::memcpy(prevGam_, gam_, sizeof(gam_));
+    std::memcpy(prevBet_, bet_, sizeof(bet_));
+    havePrev_ = true;
+    if (!filmSame)
+    {
+      stableRun_ = 0;
+      haveSteady_ = false;
+    }
+    for (int done = 0; done < n; done += kChunk)
+    {
+      const int f = std::min(kChunk, n - done);
+      bool zero = true;
+      for (int i = 0; i < f && zero; ++i)
+        zero = in[done + i] == NAM_SAMPLE(0);
+      if (zero && haveSteady_)
+      {
+        if (!filled_)
+        {
+          fillSteady();
+          filled_ = true;
+        }
+        std::fill(out + done, out + done + f, steadyOut_);
+        pos_ += static_cast<unsigned>(f);
+        continue;
+      }
+      chunk(in + done, out + done, f);
+      filled_ = false;
+      if (zero)
+      {
+        stableRun_ = std::min(stableRun_ + static_cast<unsigned>(f), 2u * receptiveField());
+        if (stableRun_ >= receptiveField())
+        {
+          steadyOut_ = out[done + f - 1];
+          haveSteady_ = true;
+        }
+      }
+      else
+      {
+        stableRun_ = 0;
+        haveSteady_ = false;
+      }
+    }
+#endif
+  }
+
+  // Sets every history to its row constant (the value in the last written column).
+  void fillSteady()
+  {
+    auto fillRing = [&](Ring& r) {
+      const size_t col = static_cast<size_t>((pos_ - 1u) & static_cast<unsigned>(r.mask));
+      for (int c = 0; c < C; ++c)
+      {
+        float* row = r.row(c);
+        std::fill(row, row + r.stride, row[col]);
+      }
+    };
+    for (int li = 0; li < NL; ++li)
+      fillRing(ring_[li]);
+    fillRing(head_);
   }
 
   struct Ring
@@ -400,6 +481,12 @@ private:
   std::vector<float> act_, cond_, out_;
   unsigned pos_ = 0;
   int F_ = 0;
+  // Silence skip state.
+  float prevGam_[NL][NOT * 4] = {};
+  float prevBet_[NL][NOT * 4] = {};
+  bool havePrev_ = false, haveSteady_ = false, filled_ = false;
+  unsigned stableRun_ = 0;
+  float steadyOut_ = 0.0f;
 };
 } // namespace tiled
 } // namespace a2_fast

@@ -447,6 +447,67 @@ void test_matches_generic_odd_block_sizes(int channels)
   }
 }
 
+// [Fork] Digital silence longer than the receptive field (about 6350 frames), then signal again.
+// The tiled engine answers such blocks without running the network; the signal that follows must
+// still match the generic model, and so must the silent stretch itself.
+void test_matches_generic_silence_gap(int channels)
+{
+  const auto cfg = build_a2_config(channels);
+  const int weight_count = a2_weight_count(channels);
+  const auto weights = make_deterministic_weights(weight_count, /*seed=*/0x51E0CE00u + channels);
+  auto noise = make_test_input(3000, 48000.0);
+  std::vector<NAM_SAMPLE> input(noise);
+  input.insert(input.end(), 9000, NAM_SAMPLE(0));
+  input.insert(input.end(), noise.begin(), noise.end());
+  for (int block : {64, 100})
+  {
+    auto fast_cfg = nam::wavenet::a2_fast::create_a2_fast_config(cfg, 48000.0);
+    std::vector<float> w_fast = weights;
+    auto fast_dsp = fast_cfg->create(std::move(w_fast), 48000.0);
+    auto generic_cfg = nam::wavenet::parse_config_json(cfg, 48000.0);
+    std::vector<float> w_gen = weights;
+    auto generic_dsp = generic_cfg.create(std::move(w_gen), 48000.0);
+    const auto out_generic = run_dsp(*generic_dsp, input, block);
+    const auto out_fast = run_dsp(*fast_dsp, input, block);
+    compare(out_generic, out_fast, channels, block, /*tol=*/5e-5);
+  }
+}
+
+void test_parametric_silence_gap(int channels, int num_params)
+{
+  const auto cfg = build_parametric_a2_config(channels, num_params);
+  const int weight_count = parametric_a2_weight_count(channels, num_params);
+  const auto weights = make_deterministic_weights(weight_count, /*seed=*/0x51E0CF00u + channels);
+  std::vector<float> knobs(num_params, 0.5f); // the defaults, so smoothing settles at once and FiLM stays constant
+  auto noise = make_test_input(3000, 48000.0);
+  std::vector<NAM_SAMPLE> input(noise);
+  input.insert(input.end(), 9000, NAM_SAMPLE(0));
+  input.insert(input.end(), noise.begin(), noise.end());
+  for (int block : {64, 100})
+  {
+    auto fast_cfg = nam::wavenet::a2_fast::create_parametric_a2_fast_config(cfg, 48000.0);
+    std::vector<float> w_fast = weights;
+    auto fast_dsp = fast_cfg->create(std::move(w_fast), 48000.0);
+    auto generic_cfg = nam::wavenet::create_parametric_config_generic(cfg, 48000.0);
+    std::vector<float> w_gen = weights;
+    auto generic_dsp = generic_cfg->create(std::move(w_gen), 48000.0);
+    fast_dsp->SetKnobValues(knobs);
+    generic_dsp->SetKnobValues(knobs);
+    const auto out_generic = run_dsp(*generic_dsp, input, block);
+    const auto out_fast = run_dsp(*fast_dsp, input, block);
+    compare_parametric(out_generic, out_fast, channels, block, /*tol=*/5e-5);
+  }
+}
+
+void test_silence_gap_all_widths()
+{
+  for (int channels : {4, 6, 8, 9})
+  {
+    test_matches_generic_silence_gap(channels);
+    test_parametric_silence_gap(channels, 2);
+  }
+}
+
 void test_matches_generic_odd_block_sizes_all_widths()
 {
   for (int channels : {3, 4, 5, 6, 7, 8, 9})
