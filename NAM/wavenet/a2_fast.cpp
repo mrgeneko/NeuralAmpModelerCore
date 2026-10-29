@@ -34,6 +34,7 @@
   #include <Eigen/Dense>
 
   #include "../dsp.h"
+  #include "a2_tiled.h"
 
 namespace nam
 {
@@ -154,6 +155,14 @@ private:
 
   int _prewarm_samples = 0;
 
+  // [Fork] Frame-major register-tiled engine (a2_tiled.h) for widths >= 4 on NEON builds.
+  #if defined(NAM_A2_TILED)
+  static constexpr bool kTiled = Channels >= tiled::kMinChannels;
+  std::unique_ptr<tiled::Engine<Channels>> _tiled;
+  #else
+  static constexpr bool kTiled = false;
+  #endif
+
   void _load_weights(std::vector<float>& weights);
   void _ring_write(Layer& L, int num_frames);
   void _head_ring_write(int num_frames);
@@ -183,6 +192,21 @@ A2FastModel<Channels>::A2FastModel(std::vector<float> weights, double expected_s
   }
 
   _load_weights(weights);
+
+  #if defined(NAM_A2_TILED)
+  if constexpr (kTiled)
+  {
+    _tiled = std::make_unique<tiled::Engine<Channels>>();
+    _tiled->setRechannel(_rechannel_w.data());
+    for (int li = 0; li < kNumLayers; li++)
+    {
+      const Layer& L = _layers[li];
+      _tiled->setLayer(li, L.conv_w.data(), L.conv_b.data(), L.mixin_w.data(), L.l1x1_w.data(), L.l1x1_b.data());
+    }
+    _tiled->setHead(_head_w, _head_b, _head_scale);
+    _tiled->reset();
+  }
+  #endif
 
   // Receptive field = 1 (the sample being produced) + sum of per-layer lookbacks +
   // (head kernel - 1). The leading 1 matches the generic WaveNet's prewarm count
@@ -314,6 +338,14 @@ void A2FastModel<Channels>::SetMaxBufferSize(int maxBufferSize)
   _cond.assign(static_cast<size_t>(maxBufferSize), 0.0f);
   _head_out.assign(static_cast<size_t>(maxBufferSize), 0.0f);
 
+  #if defined(NAM_A2_TILED)
+  if constexpr (kTiled)
+  {
+    _tiled->reset(); // its rings replace the ones below, so they are not allocated
+  }
+  else
+  #endif
+  {
   for (auto& L : _layers)
   {
   #if NAM_A2_RING_MODE == 1
@@ -339,6 +371,7 @@ void A2FastModel<Channels>::SetMaxBufferSize(int maxBufferSize)
   _head_history.assign(static_cast<size_t>(Channels) * _head_history_cols, 0.0f);
   _head_write_pos = head_lookback;
   #endif
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -2184,6 +2217,13 @@ void A2FastModel<Channels>::process(NAM_SAMPLE** input, NAM_SAMPLE** output, int
   const NAM_SAMPLE* in0 = input[0];
   NAM_SAMPLE* out0 = output[0];
 
+  float* head_out = _head_out.data();
+  #if defined(NAM_A2_TILED)
+  if constexpr (kTiled)
+    _tiled->process(in0, head_out, num_frames);
+  else
+  #endif
+  {
   // Rechannel: layer_in[c, f] = _rechannel_w[c] * input[f] for c in Channels.
   // Also prepare float cond buffer (input copied to float for inner loops).
   float* cond = _cond.data();
@@ -2202,9 +2242,10 @@ void A2FastModel<Channels>::process(NAM_SAMPLE** input, NAM_SAMPLE** output, int
   for (int li = 0; li < kNumLayers; li++)
     _layer_forward(li, cond, num_frames);
 
-  // Output.
-  float* head_out = _head_out.data();
   _head_forward(head_out, num_frames);
+  }
+
+  // Output.
   for (int f = 0; f < num_frames; f++)
     out0[f] = static_cast<NAM_SAMPLE>(head_out[f]);
 }
@@ -2418,6 +2459,15 @@ private:
 
   int _prewarm_samples = 0;
 
+  // [Fork] Frame-major register-tiled engine (a2_tiled.h) for widths >= 4 on NEON builds.
+  // Widths below that, and non-NEON builds, keep the hand-unrolled kernels below.
+  #if defined(NAM_A2_TILED)
+  static constexpr bool kTiled = Channels >= tiled::kMinChannels;
+  std::unique_ptr<tiled::Engine<Channels>> _tiled;
+  #else
+  static constexpr bool kTiled = false;
+  #endif
+
   void _load_weights(std::vector<float>& weights);
   // Rebuild _film_gamma/_film_beta for all layers from _knob_atoms. Audio thread only.
   void _recompute_film();
@@ -2458,6 +2508,21 @@ ParametricA2FastModel<Channels>::ParametricA2FastModel(std::vector<float> weight
   }
 
   _load_weights(weights);
+
+  #if defined(NAM_A2_TILED)
+  if constexpr (kTiled)
+  {
+    _tiled = std::make_unique<tiled::Engine<Channels>>();
+    _tiled->setRechannel(_rechannel_w.data());
+    for (int li = 0; li < kNumLayers; li++)
+    {
+      const Layer& L = _layers[li];
+      _tiled->setLayer(li, L.conv_w.data(), L.conv_b.data(), L.mixin_w.data(), L.l1x1_w.data(), L.l1x1_b.data());
+    }
+    _tiled->setHead(_head_w, _head_b, _head_scale);
+    _tiled->reset();
+  }
+  #endif
 
   int prewarm = 0;
   for (int i = 0; i < kNumLayers; i++)
@@ -2600,6 +2665,14 @@ void ParametricA2FastModel<Channels>::SetMaxBufferSize(int maxBufferSize)
   _cond.assign(static_cast<size_t>(maxBufferSize), 0.0f);
   _head_out.assign(static_cast<size_t>(maxBufferSize), 0.0f);
 
+  #if defined(NAM_A2_TILED)
+  if constexpr (kTiled)
+  {
+    _tiled->reset(); // its rings replace the ones below, so they are not allocated
+  }
+  else
+  #endif
+  {
   for (auto& L : _layers)
   {
   #if NAM_A2_RING_MODE == 1
@@ -2625,6 +2698,7 @@ void ParametricA2FastModel<Channels>::SetMaxBufferSize(int maxBufferSize)
   _head_history.assign(static_cast<size_t>(Channels) * _head_history_cols, 0.0f);
   _head_write_pos = head_lookback;
   #endif
+  }
 }
 
 // --- Reset (recomputes DC blocker coefficient for new sample rate) ---
@@ -3741,6 +3815,13 @@ void ParametricA2FastModel<Channels>::process(NAM_SAMPLE** input, NAM_SAMPLE** o
   const NAM_SAMPLE* in0 = input[0];
   NAM_SAMPLE* out0 = output[0];
 
+  float* head_out = _head_out.data();
+  #if defined(NAM_A2_TILED)
+  if constexpr (kTiled)
+    _tiled->process(in0, head_out, num_frames, _film_gamma, _film_beta);
+  else
+  #endif
+  {
   // Rechannel + float cond copy.
   float* cond = _cond.data();
   for (int f = 0; f < num_frames; f++)
@@ -3762,8 +3843,8 @@ void ParametricA2FastModel<Channels>::process(NAM_SAMPLE** input, NAM_SAMPLE** o
     _layer_forward(li, cond, num_frames);
 
   // Head: reads _head_sum (skip accumulator) via _head_ring_write.
-  float* head_out = _head_out.data();
   _head_forward(head_out, num_frames);
+  }
 
   // DC blocker: first-order IIR HP, fc ≈ 20 Hz. Matches ParametricWaveNet::process().
   float xp = _dc_x_prev, yp = _dc_y_prev;
