@@ -623,8 +623,8 @@ void test_container_prewarm_for_ratio_stale_stage_falls_back_to_reset()
 // shows "0 (Lite)" / "0 (Full)" instead of the real widths.
 void test_container_get_allowed_sizes_reads_array_layers_shape()
 {
-  auto j = build_container_json("example_models/wavenet.nam", "example_models/wavenet_a2_max.nam",
-                                "example_models/wavenet_a2_max.nam");
+  auto j = build_container_json("example_models/wavenet.nam", "example_models/wavenet_a2_feature_test.nam",
+                                "example_models/wavenet_a2_feature_test.nam");
   auto dsp = nam::get_dsp(j);
   auto* slimmable = dynamic_cast<nam::SlimmableModel*>(dsp.get());
   assert(slimmable != nullptr);
@@ -632,7 +632,7 @@ void test_container_get_allowed_sizes_reads_array_layers_shape()
   auto sizes = slimmable->GetAllowedSizes();
   assert(sizes.size() == 3);
   assert(sizes[0] == 3); // example_models/wavenet.nam: config.layers[0].channels == 3
-  assert(sizes[1] == 4); // example_models/wavenet_a2_max.nam: config.layers[0].channels == 4
+  assert(sizes[1] == 4); // example_models/wavenet_a2_feature_test.nam: config.layers[0].channels == 4
   assert(sizes[2] == 4);
   for (int size : sizes)
     assert(size != 0);
